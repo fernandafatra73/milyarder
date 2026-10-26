@@ -1,0 +1,8 @@
+# Hasil kompilasi Delphi
+*.dcu
+*.exe
+*.~*
+*.ddp
+*.identcache
+*.local
+__history/
