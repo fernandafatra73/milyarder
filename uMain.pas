@@ -34,6 +34,11 @@ type
   private
     pnlTop, pnlMarket, pnlRight, pnlBottom, pnlStatus, pnlCoinHead, pnlChart: TPanel;
     btnBtc, btnOpen: TPanel;
+    pnlFrame, pnlFrameBar, pnlGrip, btnFrameClose, btnFrameMax: TPanel;
+    FFrameDrag, FFrameSize, FFrameMax, FFrameInit: Boolean;
+    FFramePt: TPoint;
+    FFrameEdge: Integer;   // bit: 1 kiri, 2 kanan, 4 bawah, 8 atas
+    FFrameNormal: TRect;
     lblSource, lblCoin, lblCoinPrice, lblCoinChg: TLabel;
     lblUp, lblDown, lblGainers, lblLosers: TLabel;
     edSearch, edThreshold: TEdit;
@@ -94,6 +99,21 @@ type
     procedure ChooseSuggest(I: Integer);
     procedure AddAlert(const Sym, Txt: string);
     procedure SetSelected(const Sym: string);
+    procedure ShowFrame;
+    procedure PlaceGrip;
+    procedure FrameResize(Sender: TObject);
+    procedure RightResize(Sender: TObject);
+    procedure FrameCloseClick(Sender: TObject);
+    procedure FrameMaxClick(Sender: TObject);
+    procedure BarMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure BarMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
+    procedure GripMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure GripMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
+    procedure FrameMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure lvClick(Sender: TObject);
+    function EdgeAt(X, Y: Integer): Integer;
+    procedure EdgeMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure EdgeMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
     procedure SelectSymbol(const Sym: string);
     procedure RequestDetail;
     procedure ShowDetail(D: TDetailData);
@@ -192,7 +212,7 @@ begin
   inherited CreateNew(AOwner);
   FIndex := TStringList.Create;
   FIndex.Sorted := True;
-  FSortCol := 4;
+  FSortCol := 3;
   FSortDesc := True;
   FHoverX := -1;
   FInterval := ChartTFApi[DefaultChartTF];
@@ -410,12 +430,46 @@ begin
   end;
 
   { --- Panel kanan: header koin, grafik, detail --- }
+  { kerangka melayang di atas tabel: bisa digeser, diperbesar/diperkecil, ditutup }
+  pnlFrame := TPanel.Create(Self);
+  pnlFrame.Parent := Self;
+  pnlFrame.Visible := False;
+  pnlFrame.BevelOuter := bvNone;
+  pnlFrame.SetBounds(0, 0, 1100, 640);
+  pnlFrame.BorderWidth := 5;
+  pnlFrame.Color := clrGold;
+  pnlFrame.OnResize := FrameResize;
+  pnlFrame.OnMouseDown := EdgeMouseDown;
+  pnlFrame.OnMouseMove := EdgeMouseMove;
+  pnlFrame.OnMouseUp := FrameMouseUp;
+
+  pnlFrameBar := TPanel.Create(Self);
+  pnlFrameBar.Parent := pnlFrame;
+  pnlFrameBar.Align := alTop;
+  pnlFrameBar.Height := 26;
+  pnlFrameBar.BevelOuter := bvNone;
+  pnlFrameBar.Color := clrPanel2;
+  pnlFrameBar.Font.Color := clrGold;
+  pnlFrameBar.Font.Style := [fsBold];
+  pnlFrameBar.Alignment := taLeftJustify;
+  pnlFrameBar.Caption := '  Grafik & Analisa';
+  pnlFrameBar.Cursor := crSizeAll;
+  pnlFrameBar.OnMouseDown := BarMouseDown;
+  pnlFrameBar.OnMouseMove := BarMouseMove;
+  pnlFrameBar.OnMouseUp := FrameMouseUp;
+  btnFrameClose := MakeBtn(pnlFrameBar, 0, 2, 26, 22, 'X', clrDownBg, clrDown, FrameCloseClick);
+  btnFrameClose.Align := alRight;
+  btnFrameClose.Width := 30;
+  btnFrameMax := MakeBtn(pnlFrameBar, 0, 2, 56, 22, 'Besar', clrPanel, clrText, FrameMaxClick);
+  btnFrameMax.Align := alRight;
+  btnFrameMax.Font.Size := 8;
+
   pnlRight := TPanel.Create(Self);
-  pnlRight.Parent := Self;
-  pnlRight.Align := alRight;
-  pnlRight.Width := 660;
+  pnlRight.Parent := pnlFrame;
+  pnlRight.Align := alClient;
   pnlRight.BevelOuter := bvNone;
   pnlRight.Color := clrPanel;
+  pnlRight.OnResize := RightResize;
 
   pnlCoinHead := TPanel.Create(Self);
   pnlCoinHead.Parent := pnlRight;
@@ -456,9 +510,7 @@ begin
 
   pnlChart := TPanel.Create(Self);
   pnlChart.Parent := pnlRight;
-  pnlChart.Align := alTop;
-  pnlChart.Top := pnlTF.Top + pnlTF.Height;
-  pnlChart.Height := 400;
+  pnlChart.Align := alClient;
   pnlChart.BevelOuter := bvNone;
   pnlChart.Color := clrPanel;
   pnlChart.DoubleBuffered := True;
@@ -476,10 +528,11 @@ begin
 
   memoDetail := TMemo.Create(Self);
   memoDetail.Parent := pnlRight;
-  memoDetail.Align := alClient;
+  memoDetail.Align := alRight;
+  memoDetail.Width := 430;
   memoDetail.BorderStyle := bsNone;
   memoDetail.ReadOnly := True;
-  memoDetail.ScrollBars := ssVertical;
+  memoDetail.ScrollBars := ssBoth;
   memoDetail.WordWrap := False;
   memoDetail.Color := clrBg;
   memoDetail.Font.Name := 'Consolas';
@@ -488,11 +541,22 @@ begin
 
   with TSplitter.Create(Self) do
   begin
-    Parent := Self;
+    Parent := pnlRight;
     Align := alRight;
-    Left := pnlRight.Left - 1;
-    Width := 4;
+    Left := memoDetail.Left - 1;
+    Width := 5;
+    Color := clrPanel2;
   end;
+
+  pnlGrip := TPanel.Create(Self);
+  pnlGrip.Parent := pnlFrame;
+  pnlGrip.SetBounds(0, 0, 20, 20);
+  pnlGrip.BevelOuter := bvNone;
+  pnlGrip.Color := clrGold;
+  pnlGrip.Cursor := crSizeNWSE;
+  pnlGrip.OnMouseDown := GripMouseDown;
+  pnlGrip.OnMouseMove := GripMouseMove;
+  pnlGrip.OnMouseUp := FrameMouseUp;
 
   { --- Daftar semua koin --- }
   ilRows := TImageList.Create(Self);
@@ -523,6 +587,7 @@ begin
   lv.OnCustomDrawItem := lvCustomDrawItem;
   lv.OnCustomDrawSubItem := lvCustomDrawSubItem;
   lv.OnSelectItem := lvSelectItem;
+  lv.OnClick := lvClick;
   lv.OnColumnClick := lvColumnClick;
   lv.OnDblClick := lvDblClick;
 
@@ -1348,11 +1413,183 @@ begin
     Sender.Canvas.Font.Style := [];
 end;
 
+procedure TMainForm.ShowFrame;
+var
+  W, H: Integer;
+begin
+  if not FFrameInit then
+  begin
+    FFrameInit := True;
+    W := 1100;
+    H := lv.Height - 20;
+    if W > lv.Width - 20 then W := lv.Width - 20;
+    if H < 360 then H := 360;
+    pnlFrame.SetBounds(lv.Left + lv.Width - W - 10, lv.Top + 10, W, H);
+  end;
+  pnlFrame.Visible := True;
+  pnlFrame.BringToFront;
+  PlaceGrip;
+end;
+
+procedure TMainForm.PlaceGrip;
+begin
+  pnlGrip.SetBounds(pnlFrame.Width - 16, pnlFrame.Height - 16, 16, 16);
+  pnlGrip.BringToFront;
+end;
+
+procedure TMainForm.FrameResize(Sender: TObject);
+begin
+  PlaceGrip;
+end;
+
+procedure TMainForm.RightResize(Sender: TObject);
+begin
+  if memoDetail.Width > pnlRight.ClientWidth - 200 then
+    memoDetail.Width := pnlRight.ClientWidth - 200;
+end;
+
+function TMainForm.EdgeAt(X, Y: Integer): Integer;
+const
+  B = 8;
+begin
+  Result := 0;
+  if X < B then Result := Result or 1;
+  if X >= pnlFrame.Width - B then Result := Result or 2;
+  if Y >= pnlFrame.Height - B then Result := Result or 4;
+  if Y < B then Result := Result or 8;
+end;
+
+procedure TMainForm.EdgeMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+begin
+  FFrameEdge := EdgeAt(X, Y);
+  if (Button = mbLeft) and (FFrameEdge <> 0) and not FFrameMax then
+  begin
+    FFrameSize := True;
+    FFramePt := Mouse.CursorPos;
+  end;
+end;
+
+procedure TMainForm.EdgeMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
+var
+  P: TPoint;
+  L, T, W, H, E: Integer;
+begin
+  if not FFrameSize then
+  begin
+    E := EdgeAt(X, Y);
+    case E of
+      1, 2: pnlFrame.Cursor := crSizeWE;
+      4, 8: pnlFrame.Cursor := crSizeNS;
+      5, 10: pnlFrame.Cursor := crSizeNESW;
+      6, 9: pnlFrame.Cursor := crSizeNWSE;
+    else
+      pnlFrame.Cursor := crDefault;
+    end;
+    Exit;
+  end;
+  P := Mouse.CursorPos;
+  L := pnlFrame.Left; T := pnlFrame.Top;
+  W := pnlFrame.Width; H := pnlFrame.Height;
+  if (FFrameEdge and 2) <> 0 then Inc(W, P.X - FFramePt.X);
+  if (FFrameEdge and 4) <> 0 then Inc(H, P.Y - FFramePt.Y);
+  if (FFrameEdge and 1) <> 0 then begin Inc(L, P.X - FFramePt.X); Dec(W, P.X - FFramePt.X); end;
+  if (FFrameEdge and 8) <> 0 then begin Inc(T, P.Y - FFramePt.Y); Dec(H, P.Y - FFramePt.Y); end;
+  if W < 420 then begin if (FFrameEdge and 1) <> 0 then Dec(L, 420 - W); W := 420; end;
+  if H < 320 then begin if (FFrameEdge and 8) <> 0 then Dec(T, 320 - H); H := 320; end;
+  pnlFrame.SetBounds(L, T, W, H);
+  FFramePt := P;
+end;
+
+procedure TMainForm.FrameCloseClick(Sender: TObject);
+begin
+  pnlFrame.Visible := False;
+end;
+
+procedure TMainForm.FrameMaxClick(Sender: TObject);
+begin
+  if FFrameMax then
+  begin
+    pnlFrame.BoundsRect := FFrameNormal;
+    btnFrameMax.Caption := 'Besar';
+  end
+  else
+  begin
+    FFrameNormal := pnlFrame.BoundsRect;
+    pnlFrame.SetBounds(lv.Left, lv.Top, lv.Width, lv.Height);
+    btnFrameMax.Caption := 'Kecil';
+  end;
+  FFrameMax := not FFrameMax;
+end;
+
+procedure TMainForm.BarMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+begin
+  if (Button = mbLeft) and not FFrameMax then
+  begin
+    FFrameDrag := True;
+    FFramePt := Mouse.CursorPos;
+  end;
+end;
+
+procedure TMainForm.BarMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
+var
+  P: TPoint;
+  L, T: Integer;
+begin
+  if not FFrameDrag then
+    Exit;
+  P := Mouse.CursorPos;
+  L := pnlFrame.Left + P.X - FFramePt.X;
+  T := pnlFrame.Top + P.Y - FFramePt.Y;
+  if T < lv.Top then T := lv.Top;
+  if L < 0 then L := 0;
+  pnlFrame.SetBounds(L, T, pnlFrame.Width, pnlFrame.Height);
+  FFramePt := P;
+end;
+
+procedure TMainForm.GripMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+begin
+  if (Button = mbLeft) and not FFrameMax then
+  begin
+    FFrameSize := True;
+    FFramePt := Mouse.CursorPos;
+  end;
+end;
+
+procedure TMainForm.GripMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
+var
+  P: TPoint;
+  W, H: Integer;
+begin
+  if not FFrameSize then
+    Exit;
+  P := Mouse.CursorPos;
+  W := pnlFrame.Width + P.X - FFramePt.X;
+  H := pnlFrame.Height + P.Y - FFramePt.Y;
+  if W < 380 then W := 380;
+  if H < 320 then H := 320;
+  pnlFrame.SetBounds(pnlFrame.Left, pnlFrame.Top, W, H);
+  FFramePt := P;
+end;
+
+procedure TMainForm.FrameMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+begin
+  FFrameDrag := False;
+  FFrameSize := False;
+end;
+
+procedure TMainForm.lvClick(Sender: TObject);
+begin
+  if (lv.Selected <> nil) and not pnlFrame.Visible then
+    ShowFrame;
+end;
+
 procedure TMainForm.SetSelected(const Sym: string);
 begin
   if Sym = FSelected then
     Exit;
   FSelected := Sym;
+  pnlFrameBar.Caption := '  ' + Sym + ' - Grafik & Analisa';
+  ShowFrame;
   ResetView(FCV);
   FNoMoreHistory := False;
   SetLength(FChartK, 0);
