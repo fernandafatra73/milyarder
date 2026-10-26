@@ -28,6 +28,10 @@ type
     RangeHigh, RangeLow, MA9, MA25, VolRatio: Double;
     Alert24, AlertRise: Boolean;
     AlertBO: string;
+    BoChance: Integer;   // peluang breakout dari analisa 5 menit (0-100)
+    BoNote: string;
+    BoAlert: Boolean;
+    BoTime: TDateTime;   // jam analisa 5 menit keluar
   end;
 
   TMainForm = class(TForm)
@@ -37,6 +41,9 @@ type
     pnlFrame, pnlFrameBar, pnlGrip, btnFrameClose, btnFrameMax: TPanel;
     FFrameDrag, FFrameSize, FFrameMax, FFrameInit: Boolean;
     FFramePt: TPoint;
+    FrmCoin: TForm;
+    FPreBoBusy: Boolean;
+    FPreBoStart: Cardinal;
     FFrameEdge: Integer;   // bit: 1 kiri, 2 kanan, 4 bawah, 8 atas
     FFrameNormal: TRect;
     lblSource, lblCoin, lblCoinPrice, lblCoinChg: TLabel;
@@ -93,6 +100,8 @@ type
     procedure tmrLiveTimer(Sender: TObject);
     procedure tmrBreakoutTimer(Sender: TObject);
     procedure WMLive(var M: TMessage); message WM_FT_LIVE;
+    procedure WMPreBo(var M: TMessage); message WM_FT_PREBO;
+    procedure StartPreBo;
     procedure UpdateMarketStrip;
     procedure UpdateCoinHeader;
     procedure UpdateSuggest;
@@ -100,6 +109,7 @@ type
     procedure AddAlert(const Sym, Txt: string);
     procedure SetSelected(const Sym: string);
     procedure ShowFrame;
+    procedure FrmCoinClose(Sender: TObject; var Action: TCloseAction);
     procedure PlaceGrip;
     procedure FrameResize(Sender: TObject);
     procedure RightResize(Sender: TObject);
@@ -170,15 +180,15 @@ var
 implementation
 
 const
-  ColNames: array[0..15] of string = ('No', 'Koin', 'Harga', '24j %',
+  ColNames: array[0..16] of string = ('No', 'Koin', 'Harga', '24j %',
     'Volume 24j', 'Beli %', 'Jual %', 'Beli $ (24j)', 'Jual $ (24j)', 'Trend MA',
-    'Cross MA terakhir', 'Support', 'Resisten', 'Support terkuat (x mantul)', 'Status', 'Sinyal');
-  ColWidths: array[0..15] of Integer = (42, 105, 95, 72, 88, 58, 58, 88, 88, 100,
-    150, 88, 88, 165, 120, 135);
+    'Cross MA terakhir', 'Support', 'Resisten', 'Support terkuat (x mantul)', 'Status', 'Sinyal', 'Peluang BO 5m (jam)');
+  ColWidths: array[0..16] of Integer = (42, 105, 95, 72, 88, 58, 58, 88, 88, 100,
+    150, 88, 88, 165, 120, 135, 140);
 
-  FilterNames: array[0..9] of string = ('Semua koin', 'Naik >= warning %', 'Turun',
+  FilterNames: array[0..10] of string = ('Semua koin', 'Naik >= warning %', 'Turun',
     'Mau breakout / breakout', 'Golden cross baru', 'Death cross baru',
-    'Trend bullish', 'Trend bearish', 'Sinyal BELI', 'Sinyal JUAL');
+    'Trend bullish', 'Trend bearish', 'Sinyal BELI', 'Sinyal JUAL', 'Peluang breakout tinggi (>=75)');
 
 function Bar(Pct: Double; W: Integer): string;
 var
@@ -217,6 +227,7 @@ begin
   FHoverX := -1;
   FInterval := ChartTFApi[DefaultChartTF];
   BuildUI;
+  FrmCoin.HandleNeeded;   // siapkan jendela kerangka sejak awal agar muncul instan
   UpdateTFButtons;
   FScanner := TScannerThread.Create(Handle);
 end;
@@ -431,13 +442,22 @@ begin
 
   { --- Panel kanan: header koin, grafik, detail --- }
   { kerangka melayang di atas tabel: bisa digeser, diperbesar/diperkecil, ditutup }
+  { jendela terpisah di luar tabel: bisa dipindah ke mana saja, diubah ukurannya }
+  FrmCoin := TForm.CreateNew(Self);
+  FrmCoin.BorderStyle := bsSizeable;
+  FrmCoin.Caption := 'Grafik & Analisa';
+  FrmCoin.Color := clrPanel;
+  FrmCoin.Position := poDesigned;
+  FrmCoin.SetBounds(Screen.Width - 1120, 90, 1100, 680);
+  FrmCoin.Constraints.MinWidth := 420;
+  FrmCoin.Constraints.MinHeight := 320;
+  FrmCoin.OnClose := FrmCoinClose;
+
   pnlFrame := TPanel.Create(Self);
-  pnlFrame.Parent := Self;
-  pnlFrame.Visible := False;
+  pnlFrame.Parent := FrmCoin;
+  pnlFrame.Align := alClient;
   pnlFrame.BevelOuter := bvNone;
-  pnlFrame.SetBounds(0, 0, 1100, 640);
-  pnlFrame.BorderWidth := 5;
-  pnlFrame.Color := clrGold;
+  pnlFrame.Color := clrPanel;
   pnlFrame.OnResize := FrameResize;
   pnlFrame.OnMouseDown := EdgeMouseDown;
   pnlFrame.OnMouseMove := EdgeMouseMove;
@@ -445,6 +465,7 @@ begin
 
   pnlFrameBar := TPanel.Create(Self);
   pnlFrameBar.Parent := pnlFrame;
+  pnlFrameBar.Visible := False;   // judul & tombol sudah disediakan jendela
   pnlFrameBar.Align := alTop;
   pnlFrameBar.Height := 26;
   pnlFrameBar.BevelOuter := bvNone;
@@ -550,6 +571,7 @@ begin
 
   pnlGrip := TPanel.Create(Self);
   pnlGrip.Parent := pnlFrame;
+  pnlGrip.Visible := False;
   pnlGrip.SetBounds(0, 0, 20, 20);
   pnlGrip.BevelOuter := bvNone;
   pnlGrip.Color := clrGold;
@@ -610,7 +632,7 @@ begin
   tmrDetail.OnTimer := tmrDetailTimer;
   tmrSelect := TTimer.Create(Self);
   tmrSelect.Enabled := False;
-  tmrSelect.Interval := 300;
+  tmrSelect.Interval := 150;
   tmrSelect.OnTimer := tmrSelectTimer;
   tmrRefresh := TTimer.Create(Self);
   tmrRefresh.Interval := 1500;
@@ -674,6 +696,7 @@ begin
     7: Result := R.Scanned and (R.TrendScore <= -2);
     8: Result := R.Signal = 'BELI';
     9: Result := R.Signal = 'JUAL';
+    10: Result := R.BoChance >= 75;
   else
     Result := True;
   end;
@@ -703,6 +726,7 @@ begin
     13: Result := FCoins[A].StrongHits - FCoins[B].StrongHits;
     14: Result := CompareStr(FCoins[A].Breakout, FCoins[B].Breakout);
     15: Result := FCoins[A].Score - FCoins[B].Score;
+    16: Result := FCoins[A].BoChance - FCoins[B].BoChance;
   else
     Result := CmpF(FCoins[A].QuoteVol, FCoins[B].QuoteVol);
   end;
@@ -812,8 +836,104 @@ begin
           [B, Symbol, FmtPrice(Price), FmtPrice(RangeHigh), FmtPrice(RangeLow)]));
       AlertBO := B;
     end;
+  StartPreBo;
   FLastBreakoutCheck := Now;
   FDirty := True;
+end;
+
+{ Koin yang harganya sudah dekat/di atas resisten 1 jam dianalisa lagi dengan
+  candle 5 menit untuk menilai peluang breakout (dilihat dari persilangan MA
+  di bawah harga). Maksimal 12 koin terdekat per putaran. }
+procedure TMainForm.StartPreBo;
+var
+  I, J, N: Integer;
+  Dist: array of Double;
+  Cand: array of Integer;
+  Syms: array of string;
+  Highs: array of Double;
+  D: Double;
+begin
+  if FPreBoBusy and (GetTickCount - FPreBoStart < 60000) then
+    Exit;
+  N := 0;
+  SetLength(Cand, Length(FCoins));
+  SetLength(Dist, Length(FCoins));
+  for I := 0 to High(FCoins) do
+    with FCoins[I] do
+    begin
+      if Scanned and (RangeHigh > 0) and (Price >= RangeHigh * 0.97) then
+      begin
+        D := Abs(RangeHigh - Price) / RangeHigh;
+        J := N;
+        while (J > 0) and (Dist[J - 1] > D) do   // urut: paling dekat resisten dulu
+        begin
+          Dist[J] := Dist[J - 1];
+          Cand[J] := Cand[J - 1];
+          Dec(J);
+        end;
+        Dist[J] := D;
+        Cand[J] := I;
+        Inc(N);
+      end
+      else if BoChance <> 0 then
+      begin
+        BoChance := 0;
+        BoNote := '';
+        BoAlert := False;
+        FDirty := True;
+      end;
+    end;
+  if N > 12 then
+    N := 12;
+  if N = 0 then
+    Exit;
+  SetLength(Syms, N);
+  SetLength(Highs, N);
+  for I := 0 to N - 1 do
+  begin
+    Syms[I] := FCoins[Cand[I]].Symbol;
+    Highs[I] := FCoins[Cand[I]].RangeHigh;
+  end;
+  FPreBoBusy := True;
+  FPreBoStart := GetTickCount;
+  TPreBoThread.Create(Handle, Syms, Highs);
+end;
+
+procedure TMainForm.WMPreBo(var M: TMessage);
+var
+  D: TPreBoData;
+  Idx: Integer;
+begin
+  D := TPreBoData(M.LParam);
+  try
+    if D.Last then
+    begin
+      FPreBoBusy := False;
+      Exit;
+    end;
+    if D.Err <> '' then
+      Exit;
+    Idx := FindCoin(D.Sym);
+    if Idx < 0 then
+      Exit;
+    with FCoins[Idx] do
+    begin
+      BoChance := D.Chance;
+      BoNote := D.Note;
+      BoTime := Now;
+      if (BoChance >= 75) and not BoAlert then
+      begin
+        BoAlert := True;
+        AddAlert(Symbol, Format('[PELUANG BREAKOUT %d%%] %s harga %s, resisten %s - %s (analisa 5m jam %s)',
+          [BoChance, Symbol, FmtPrice(Price), FmtPrice(RangeHigh), BoNote, FormatDateTime('hh:nn:ss', BoTime)]));
+      end
+      else if BoChance < 60 then
+        BoAlert := False;
+    end;
+    FDirty := True;
+  finally
+    D.Free;
+  end;
 end;
 
 procedure TMainForm.tmrLiveTimer(Sender: TObject);
@@ -1022,6 +1142,7 @@ begin
   lbSuggest.Visible := False;
   SelectSymbol(lbSuggest.Items[I]);
   lv.SetFocus;
+  lbSuggest.Visible := False;   // teks cari sudah dikosongkan, jangan munculkan pilihan lagi
 end;
 
 procedure TMainForm.lbSuggestDrawItem(Control: TWinControl; Index: Integer;
@@ -1352,6 +1473,12 @@ begin
       Item.SubItems.Add('...');
       Item.SubItems.Add('menganalisa...');
     end;
+    while Item.SubItems.Count < 15 do
+      Item.SubItems.Add('');
+    if BoChance > 0 then
+      Item.SubItems.Add(Format('%d%%  %s', [BoChance, FormatDateTime('hh:nn:ss', BoTime)]))
+    else
+      Item.SubItems.Add('-');
   end;
 end;
 
@@ -1400,6 +1527,9 @@ begin
       11: C := clrUp;
       12: C := clrDown;
       13: C := clrGold;
+      16: if BoChance >= 75 then C := clrUp
+          else if BoChance >= 55 then C := clrGold
+          else C := clrDim;
       14: if Pos('BREAKOUT', Breakout) > 0 then C := clrGold
           else if Breakout <> '' then C := clrDown;
       15: if Signal = 'BELI' then C := clrUp
@@ -1414,21 +1544,20 @@ begin
 end;
 
 procedure TMainForm.ShowFrame;
-var
-  W, H: Integer;
 begin
   if not FFrameInit then
   begin
     FFrameInit := True;
-    W := 1100;
-    H := lv.Height - 20;
-    if W > lv.Width - 20 then W := lv.Width - 20;
-    if H < 360 then H := 360;
-    pnlFrame.SetBounds(lv.Left + lv.Width - W - 10, lv.Top + 10, W, H);
+    SetWindowLong(FrmCoin.Handle, GWL_HWNDPARENT, Integer(Handle));   // selalu di atas jendela utama
   end;
-  pnlFrame.Visible := True;
-  pnlFrame.BringToFront;
-  PlaceGrip;
+  if not FrmCoin.Visible then
+    ShowWindow(FrmCoin.Handle, SW_SHOWNOACTIVATE);   // jangan curi fokus dari tabel
+  FrmCoin.Visible := True;
+end;
+
+procedure TMainForm.FrmCoinClose(Sender: TObject; var Action: TCloseAction);
+begin
+  Action := caHide;
 end;
 
 procedure TMainForm.PlaceGrip;
@@ -1578,8 +1707,31 @@ begin
 end;
 
 procedure TMainForm.lvClick(Sender: TObject);
+var
+  I: Integer;
+  Sym: string;
 begin
-  if (lv.Selected <> nil) and not pnlFrame.Visible then
+  if lv.Selected = nil then
+    Exit;
+  if tmrSelect.Enabled then
+  begin
+    { klik mouse: ambil data sekarang juga, tidak perlu menunggu jeda }
+    tmrSelect.Enabled := False;
+    RequestDetail;
+  end;
+  if edSearch.Text <> '' then
+  begin
+    { koin sudah dipilih dari hasil pencarian: kosongkan kotak cari, tampilkan semua koin }
+    Sym := FSelected;
+    edSearch.Text := '';
+    for I := 0 to High(FView) do
+      if FCoins[FView[I]].Symbol = Sym then
+      begin
+        lv.Items[I].MakeVisible(False);
+        Break;
+      end;
+  end;
+  if not FrmCoin.Visible then
     ShowFrame;
 end;
 
@@ -1588,7 +1740,7 @@ begin
   if Sym = FSelected then
     Exit;
   FSelected := Sym;
-  pnlFrameBar.Caption := '  ' + Sym + ' - Grafik & Analisa';
+  FrmCoin.Caption := Sym + ' - Grafik & Analisa';
   ShowFrame;
   ResetView(FCV);
   FNoMoreHistory := False;

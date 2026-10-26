@@ -16,6 +16,7 @@ const
   WM_FT_BTC     = WM_USER + 205;
   WM_FT_LIVE    = WM_USER + 206;
   WM_FT_OLDER   = WM_USER + 207;
+  WM_FT_PREBO   = WM_USER + 208;
 
   ScanInterval = '1h';
   ScanPerCycle = 12;
@@ -126,6 +127,25 @@ type
     procedure Execute; override;
   public
     constructor Create(AWnd: HWND; const Sym, Interval: string; EndTime: Double);
+  end;
+
+  TPreBoData = class
+  public
+    Sym, Note, Err: string;
+    Chance: Integer;
+    Last: Boolean;   // pesan terakhir dari satu putaran
+  end;
+
+  { Analisa candle 5 menit untuk koin yang dekat resisten (peluang breakout) }
+  TPreBoThread = class(TThread)
+  private
+    FWnd: HWND;
+    FSyms: array of string;
+    FHigh: array of Double;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AWnd: HWND; const Syms: array of string; const Highs: array of Double);
   end;
 
   TBtcThread = class(TThread)
@@ -334,17 +354,17 @@ end;
 
 procedure TDetailThread.Execute;
 var
-  D: TDetailData;
+  D, D2: TDetailData;
   K: TKlines;
 begin
   D := TDetailData.Create;
+  D2 := nil;
   D.ReqId := FReqId;
   try
     EnsureSource;
     K := GetKlines(FSym, FInterval, KlineLimit);
     D.K := K;
     D.A := Analyze(FSym, FInterval, K);
-    D.DepthOk := GetDepthUSD(FSym, D.BidUSD, D.AskUSD);
   except
     on E: Exception do
     begin
@@ -352,7 +372,72 @@ begin
       D.Err := E.Message;
     end;
   end;
+  { grafik & analisa dikirim dulu; order book menyusul agar tampilan tidak menunggu }
+  if D.Err = '' then
+  begin
+    D2 := TDetailData.Create;
+    D2.ReqId := D.ReqId;
+    D2.A := D.A;
+    D2.K := D.K;
+  end;
   PostObj(FWnd, WM_FT_DETAIL, D);
+  if D2 <> nil then
+  begin
+    try
+      D2.DepthOk := GetDepthUSD(FSym, D2.BidUSD, D2.AskUSD);
+    except
+    end;
+    if D2.DepthOk then
+      PostObj(FWnd, WM_FT_DETAIL, D2)
+    else
+      D2.Free;
+  end;
+end;
+
+{ TPreBoThread }
+
+constructor TPreBoThread.Create(AWnd: HWND; const Syms: array of string; const Highs: array of Double);
+var
+  I: Integer;
+begin
+  FWnd := AWnd;
+  SetLength(FSyms, Length(Syms));
+  SetLength(FHigh, Length(Syms));
+  for I := 0 to High(Syms) do
+  begin
+    FSyms[I] := Syms[I];
+    FHigh[I] := Highs[I];
+  end;
+  FreeOnTerminate := True;
+  inherited Create(False);
+end;
+
+procedure TPreBoThread.Execute;
+var
+  I: Integer;
+  D: TPreBoData;
+  K: TKlines;
+begin
+  EnsureSource;
+  for I := 0 to High(FSyms) do
+  begin
+    if Terminated then
+      Break;
+    D := TPreBoData.Create;
+    D.Sym := FSyms[I];
+    try
+      K := GetKlines(FSyms[I], '5m', 60);
+      D.Chance := BreakoutChance(K, FHigh[I], D.Note);
+    except
+      on E: Exception do
+        D.Err := E.Message;
+    end;
+    PostObj(FWnd, WM_FT_PREBO, D);
+    Sleep(150);
+  end;
+  D := TPreBoData.Create;
+  D.Last := True;
+  PostObj(FWnd, WM_FT_PREBO, D);
 end;
 
 { TLiveThread }

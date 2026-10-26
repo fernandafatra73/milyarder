@@ -63,6 +63,7 @@ type
 
 procedure ClearAnalysis(var A: TAnalysis);
 function BreakoutStatus(Price, RangeHigh, RangeLow, MA9, MA25, VolRatio: Double): string;
+function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string): Integer;
 procedure MergeKlines(var K: TKlines; const U: TKlines);
 function PrependKlines(var K: TKlines; const Old: TKlines): Integer;
 function Analyze(const Sym, Interval: string; const K: TKlines): TAnalysis;
@@ -95,6 +96,117 @@ begin
     Result := 'MAU BREAKOUT'
   else if (Price <= RangeLow * 1.015) and (MA9 < MA25) then
     Result := 'MAU BREAKDOWN';
+end;
+
+{ Peluang breakout (0-100) dari candle 5 menit terakhir, dilihat dari bawah:
+  persilangan MA9 memotong MA25 ke atas, higher low, volume & tekanan beli
+  naik, serta dekat/di atas resisten (RangeHigh dari analisa 1 jam). }
+function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string): Integer;
+var
+  n, last, j, Back: Integer;
+  P, gNow, gPrev, minA, minB, vNow, vOld, qv, tb, d, rise: Double;
+  Crossed: Boolean;
+
+  function SMA5(Period, Idx: Integer): Double;
+  var
+    X: Integer;
+  begin
+    Result := 0;
+    for X := Idx - Period + 1 to Idx do
+      Result := Result + K[X].C;
+    Result := Result / Period;
+  end;
+
+  function Gap(Idx: Integer): Double;
+  begin
+    Result := SMA5(9, Idx) - SMA5(25, Idx);
+  end;
+
+  procedure Pt(Points: Integer; const Txt: string);
+  begin
+    Inc(Result, Points);
+    if Note <> '' then
+      Note := Note + '; ';
+    Note := Note + Txt;
+  end;
+
+begin
+  Result := 0;
+  Note := '';
+  n := Length(K);
+  if n < 40 then
+    Exit;
+  last := n - 1;
+  P := K[last].C;
+  if P <= 0 then
+    Exit;
+
+  { persilangan dari bawah ke atas dalam 3 candle (15 menit) terakhir }
+  Crossed := False;
+  Back := 0;
+  for j := last downto last - 2 do
+    if (Gap(j - 1) <= 0) and (Gap(j) > 0) then
+    begin
+      Crossed := True;
+      Back := last - j;
+      Break;
+    end;
+  gNow := Gap(last);
+  gPrev := Gap(last - 1);
+  if Crossed then
+    Pt(30, Format('MA9 baru memotong MA25 dari bawah (%d candle 5m lalu)', [Back]))
+  else if (gNow < 0) and (gNow > gPrev) and (Abs(gNow) / P < 0.003) then
+    Pt(22, 'MA9 hampir memotong MA25 dari bawah')
+  else if (gNow > 0) and (gNow > gPrev) then
+    Pt(8, 'MA9 di atas MA25 dan melebar');
+  if (P > SMA5(9, last)) and (P > SMA5(25, last)) then
+    Pt(8, 'harga di atas MA9 & MA25');
+
+  { higher low: dasar 3 candle terakhir lebih tinggi dari 3 sebelumnya }
+  minA := K[last].L;
+  minB := K[last - 3].L;
+  for j := last - 2 to last do
+    if K[j].L < minA then minA := K[j].L;
+  for j := last - 5 to last - 3 do
+    if K[j].L < minB then minB := K[j].L;
+  if minA > minB then
+    Pt(12, 'higher low');
+
+  { volume 15 menit terakhir vs rata-rata 20 candle sebelumnya }
+  vNow := (K[last].QV + K[last - 1].QV + K[last - 2].QV) / 3;
+  vOld := 0;
+  for j := last - 22 to last - 3 do
+    vOld := vOld + K[j].QV;
+  vOld := vOld / 20;
+  if vOld > 0 then
+  begin
+    if vNow >= vOld * 2 then Pt(20, Format('volume %.1fx rata-rata', [vNow / vOld]))
+    else if vNow >= vOld * 1.3 then Pt(12, Format('volume %.1fx rata-rata', [vNow / vOld]))
+    else if vNow >= vOld then Pt(5, 'volume naik');
+  end;
+
+  { dominasi pembeli agresif 15 menit terakhir }
+  qv := K[last].QV + K[last - 1].QV + K[last - 2].QV;
+  tb := K[last].TBQV + K[last - 1].TBQV + K[last - 2].TBQV;
+  if (qv > 0) and (tb / qv >= 0.55) then
+    Pt(10, Format('pembeli agresif %.0f%%', [tb / qv * 100]));
+
+  { jarak ke resisten }
+  if RangeHigh > 0 then
+  begin
+    d := (RangeHigh - P) / RangeHigh * 100;
+    if d < 0 then Pt(20, 'sudah di atas resisten')
+    else if d <= 0.5 then Pt(20, Format('%.2f%% dari resisten', [d]))
+    else if d <= 1.5 then Pt(12, Format('%.2f%% dari resisten', [d]))
+    else if d <= 3 then Pt(5, Format('%.2f%% dari resisten', [d]));
+  end;
+
+  rise := (P - K[last - 5].C) / K[last - 5].C * 100;
+  if rise > 0 then
+    Pt(5, Format('naik %.2f%% dalam 30 menit', [rise]));
+
+  if Result > 100 then
+    Result := 100;
 end;
 
 { Gabungkan candle terbaru (U) ke grafik (K): candle dengan waktu buka sama
