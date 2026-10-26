@@ -24,6 +24,8 @@ type
     Support, Resist, Rise4: Double;
     StrongSup: Double;
     StrongHits: Integer;
+    // dari analisa terakhir, untuk cek breakout ulang tiap menit
+    RangeHigh, RangeLow, MA9, MA25, VolRatio: Double;
     Alert24, AlertRise: Boolean;
     AlertBO: string;
   end;
@@ -45,7 +47,8 @@ type
     pbChart: TPaintBox;
     memoDetail: TMemo;
     lbAlerts, lbSuggest: TListBox;
-    tmrDetail, tmrSelect, tmrRefresh, tmrLive: TTimer;
+    tmrDetail, tmrSelect, tmrRefresh, tmrLive, tmrBreakout: TTimer;
+    FLastBreakoutCheck: TDateTime;
     lblLive: TLabel;
     FLiveBusy: Boolean;
     FLiveStart: Cardinal;
@@ -83,6 +86,7 @@ type
     procedure RebuildView;
     procedure tmrRefreshTimer(Sender: TObject);
     procedure tmrLiveTimer(Sender: TObject);
+    procedure tmrBreakoutTimer(Sender: TObject);
     procedure WMLive(var M: TMessage); message WM_FT_LIVE;
     procedure UpdateMarketStrip;
     procedure UpdateCoinHeader;
@@ -441,12 +445,12 @@ begin
   pnlTF.Color := clrPanel;
   for I := 0 to ChartTFCount - 1 do
   begin
-    FTFBtns[I] := MakeBtn(pnlTF, 8 + I * 66, 5, 60, 24, ChartTFLabels[I],
+    FTFBtns[I] := MakeBtn(pnlTF, 8 + I * 58, 5, 54, 24, ChartTFLabels[I],
       clrPanel2, clrDim, TFClick);
     FTFBtns[I].Font.Size := 9;
     FTFBtns[I].Tag := I;
   end;
-  lblLive := MakeLabel(pnlTF, 8 + ChartTFCount * 66 + 6, 9, '');
+  lblLive := MakeLabel(pnlTF, 8 + ChartTFCount * 58 + 6, 9, '');
   lblLive.Font.Style := [fsBold];
   lblLive.Font.Color := clrUp;
 
@@ -549,6 +553,9 @@ begin
   tmrLive := TTimer.Create(Self);
   tmrLive.Interval := 1000;   // harga grafik diperbarui tiap 1 detik
   tmrLive.OnTimer := tmrLiveTimer;
+  tmrBreakout := TTimer.Create(Self);
+  tmrBreakout.Interval := 60000;   // analisa breakout semua koin diperbarui tiap 1 menit
+  tmrBreakout.OnTimer := tmrBreakoutTimer;
 
   memoDetail.Lines.Text :=
     ' Selamat datang di FERNANDA TAKER' + #13#10 + #13#10 +
@@ -717,6 +724,33 @@ begin
     lbSuggest.Invalidate;
 end;
 
+{ Cek ulang status breakout semua koin yang sudah dianalisa memakai harga
+  terbaru dari ticker; batas range diambil dari analisa terakhir. }
+procedure TMainForm.tmrBreakoutTimer(Sender: TObject);
+var
+  I: Integer;
+  B: string;
+begin
+  for I := 0 to High(FCoins) do
+    with FCoins[I] do
+    begin
+      if not Scanned then
+        Continue;
+      B := BreakoutStatus(Price, RangeHigh, RangeLow, MA9, MA25, VolRatio);
+      if B <> Breakout then
+      begin
+        Breakout := B;
+        FDirty := True;
+      end;
+      if (B <> '') and (B <> AlertBO) then
+        AddAlert(Symbol, Format('[%s] %s harga %s, resisten %s, support %s',
+          [B, Symbol, FmtPrice(Price), FmtPrice(RangeHigh), FmtPrice(RangeLow)]));
+      AlertBO := B;
+    end;
+  FLastBreakoutCheck := Now;
+  FDirty := True;
+end;
+
 procedure TMainForm.tmrLiveTimer(Sender: TObject);
 begin
   if (FSelected = '') or (Length(FChartK) = 0) then
@@ -835,6 +869,8 @@ begin
     [SourceName, Length(FCoins), Length(FView), FScanned, Length(FCoins)]);
   if FLastTicker > 0 then
     S := S + '   |   Update: ' + FormatDateTime('hh:nn:ss', FLastTicker);
+  if FLastBreakoutCheck > 0 then
+    S := S + '   |   Breakout dicek: ' + FormatDateTime('hh:nn:ss', FLastBreakoutCheck);
   if Extra <> '' then
     S := S + '   |   ' + Extra;
   pnlStatus.Caption := S;
@@ -1088,6 +1124,11 @@ begin
     StrongHits := A.StrongSupHits;
     Rise4 := A.Rise4;
     Breakout := A.Breakout;
+    RangeHigh := A.RangeHigh;
+    RangeLow := A.RangeLow;
+    MA9 := A.MA[0];
+    MA25 := A.MA[1];
+    VolRatio := A.VolRatio;
     Signal := A.Signal;
     Score := A.Score;
 

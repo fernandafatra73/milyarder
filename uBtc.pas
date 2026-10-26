@@ -150,7 +150,7 @@ begin
   for I := 0 to ChartTFCount - 1 do
   begin
     FTFBtns[I] := MakeBtn(Self, pnlTF, ChartTFLabels[I], clrPanel2, clrDim, TFClick);
-    FTFBtns[I].SetBounds(8 + I * 66, 5, 60, 24);
+    FTFBtns[I].SetBounds(8 + I * 58, 5, 54, 24);
     FTFBtns[I].Font.Size := 9;
     FTFBtns[I].Tag := I;
   end;

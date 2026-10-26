@@ -62,6 +62,7 @@ type
   end;
 
 procedure ClearAnalysis(var A: TAnalysis);
+function BreakoutStatus(Price, RangeHigh, RangeLow, MA9, MA25, VolRatio: Double): string;
 procedure MergeKlines(var K: TKlines; const U: TKlines);
 function PrependKlines(var K: TKlines; const Old: TKlines): Integer;
 function Analyze(const Sym, Interval: string; const K: TKlines): TAnalysis;
@@ -77,6 +78,23 @@ begin
   Finalize(A);
   FillChar(A, SizeOf(A), 0);
   A.LastCrossAgo := -1;
+end;
+
+{ Status breakout dari harga terhadap range 50 candle. Dipakai Analyze dan
+  pengecekan ulang tiap menit dengan harga terbaru. }
+function BreakoutStatus(Price, RangeHigh, RangeLow, MA9, MA25, VolRatio: Double): string;
+begin
+  Result := '';
+  if (RangeHigh <= 0) or (RangeLow <= 0) then
+    Exit;
+  if Price > RangeHigh then
+    Result := 'BREAKOUT NAIK'
+  else if Price < RangeLow then
+    Result := 'BREAKDOWN'
+  else if (Price >= RangeHigh * 0.985) and ((MA9 > MA25) or (VolRatio >= 1.5)) then
+    Result := 'MAU BREAKOUT'
+  else if (Price <= RangeLow * 1.015) and (MA9 < MA25) then
+    Result := 'MAU BREAKDOWN';
 end;
 
 { Gabungkan candle terbaru (U) ke grafik (K): candle dengan waktu buka sama
@@ -471,14 +489,8 @@ begin
     Result.ChgLast := (P - K[n - 1].O) / K[n - 1].O * 100;
 
   { --- Breakout --- }
-  if P > Result.RangeHigh then
-    Result.Breakout := 'BREAKOUT NAIK'
-  else if P < Result.RangeLow then
-    Result.Breakout := 'BREAKDOWN'
-  else if (P >= Result.RangeHigh * 0.985) and ((Result.MA[0] > Result.MA[1]) or (Result.VolRatio >= 1.5)) then
-    Result.Breakout := 'MAU BREAKOUT'
-  else if (P <= Result.RangeLow * 1.015) and (Result.MA[0] < Result.MA[1]) then
-    Result.Breakout := 'MAU BREAKDOWN';
+  Result.Breakout := BreakoutStatus(P, Result.RangeHigh, Result.RangeLow,
+    Result.MA[0], Result.MA[1], Result.VolRatio);
 
   { --- Sinyal --- }
   if Result.TrendScore >= 2 then

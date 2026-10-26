@@ -25,12 +25,12 @@ const
   BtcIntervalNames: array[0..3] of string = ('15 Menit', '1 Jam', '4 Jam', '1 Hari');
 
   // pilihan time frame grafik: label tombol & interval API Binance
-  ChartTFCount = 8;
+  ChartTFCount = 9;
   ChartTFLabels: array[0..ChartTFCount - 1] of string =
-    ('1m', '5m', '10m', '15m', '1 jam', '2 jam', '4 jam', '1 bln');
+    ('1m', '5m', '10m', '15m', '30m', '1 jam', '2 jam', '4 jam', '1 bln');
   ChartTFApi: array[0..ChartTFCount - 1] of string =
-    ('1m', '5m', '10m', '15m', '1h', '2h', '4h', '1M');
-  DefaultChartTF = 4;  // 1 jam
+    ('1m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1M');
+  DefaultChartTF = 5;  // 1 jam
 
 function ChartTFLabel(const Api: string): string;
 
