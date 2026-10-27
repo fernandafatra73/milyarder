@@ -410,7 +410,7 @@ begin
   chkSound.Parent := pnlTop;
   chkSound.SetBounds(746, 30, 60, 19);
   chkSound.Caption := 'Suara';
-  chkSound.Checked := True;
+  chkSound.Checked := False;   // bunyi peringatan mati; centang "Suara" untuk menyalakan
   chkSound.Color := clrPanel;
   chkSound.Font.Color := clrText;
 
