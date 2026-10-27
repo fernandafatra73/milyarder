@@ -42,6 +42,13 @@ type
     DragShift: Double;
   end;
 
+type
+  { dipasang unit pola candle: pola terbaik pada candle E (False = tidak ada) }
+  TPatternHook = function(const K: TKlines; E: Integer; var Name: string; var Dir, Str: Integer): Boolean;
+
+var
+  ChartPatternHook: TPatternHook = nil;
+
 procedure DrawCandles(C: TCanvas; R: TRect; const K: TKlines; const A: TAnalysis;
   HoverX: Integer; const Title: string; var View: TChartView);
 procedure DrawSpark(C: TCanvas; R: TRect; const V: array of Double; Bg: TColor);
@@ -157,9 +164,49 @@ begin
   C.Pen.Width := 1;
 end;
 
+type
+  TMark = record
+    Idx, Dir, Str: Integer;
+    Name: string;
+  end;
+
+var
+  MarkCache: array of TMark;
+  MarkN: Integer = -1;
+  MarkFirstTime, MarkLastTime: Double;
+
+{ hitung ulang penanda pola hanya bila data candle berubah (bukan tiap gambar ulang) }
+procedure EnsureMarks(const K: TKlines);
+var
+  n, E, D, S: Integer;
+  Nm: string;
+begin
+  n := Length(K);
+  if (n = MarkN) and (K[0].OpenTime = MarkFirstTime) and (K[n - 1].OpenTime = MarkLastTime) then
+    Exit;
+  MarkN := n;
+  MarkFirstTime := K[0].OpenTime;
+  MarkLastTime := K[n - 1].OpenTime;
+  SetLength(MarkCache, 0);
+  for E := Max(22, n - 400) to n - 2 do
+    if ChartPatternHook(K, E, Nm, D, S) and (S >= 2) then
+    begin
+      SetLength(MarkCache, Length(MarkCache) + 1);
+      with MarkCache[High(MarkCache)] do
+      begin
+        Idx := E;
+        Dir := D;
+        Str := S;
+        Name := Nm;
+      end;
+    end;
+end;
+
 procedure DrawCandles(C: TCanvas; R: TRect; const K: TKlines; const A: TAnalysis;
   HoverX: Integer; const Title: string; var View: TChartView);
 var
+  mk, mx, my, mw, mh, lastRU, lastRD: Integer;
+  mt: string;
   n, vis, first, last, lastData, maxVis, i, m, x, bw, plotL, plotR, plotT, plotB, volT, volB, y1, y2, hov, tx: Integer;
   hi, lo, vmax, slot, v, step: Double;
   cum: array of Double;
@@ -361,6 +408,53 @@ begin
       Level(A.StrongSup, clrGold, Format('SUPPORT TERKUAT %s (%dx memantul)', [FmtPrice(A.StrongSup), A.StrongSupHits]));
     if A.StrongResHits > 0 then
       Level(A.StrongRes, clrMA25, Format('RESISTEN TERKUAT %s (%dx ditolak)', [FmtPrice(A.StrongRes), A.StrongResHits]));
+  end;
+
+  { penanda pola candle: panah + nama; hijau di bawah candle = BELI, merah di atas = JUAL }
+  if Assigned(ChartPatternHook) and (n > 30) then
+  begin
+    EnsureMarks(K);
+    lastRU := -1000;
+    lastRD := -1000;
+    C.Font.Size := 7;
+    mh := C.TextHeight('A');
+    for mk := 0 to High(MarkCache) do
+      if (MarkCache[mk].Idx >= first) and (MarkCache[mk].Idx <= lastData) then
+      begin
+        mx := XC(MarkCache[mk].Idx);
+        if MarkCache[mk].Dir > 0 then
+        begin
+          my := Y(K[MarkCache[mk].Idx].L) + 4;
+          C.Pen.Color := clrUp;
+          C.Brush.Color := clrUp;
+          C.Brush.Style := bsSolid;
+          C.Polygon([Point(mx, my), Point(mx - 4, my + 7), Point(mx + 4, my + 7)]);
+          mt := 'BELI ' + MarkCache[mk].Name;
+          mw := C.TextWidth(mt);
+          if mx - mw div 2 > lastRU + 6 then
+          begin
+            TextAt(mx - mw div 2, my + 9, mt, clrUp, True);
+            lastRU := mx + mw div 2;
+          end;
+        end
+        else
+        begin
+          my := Y(K[MarkCache[mk].Idx].H) - 4;
+          C.Pen.Color := clrDown;
+          C.Brush.Color := clrDown;
+          C.Brush.Style := bsSolid;
+          C.Polygon([Point(mx, my), Point(mx - 4, my - 7), Point(mx + 4, my - 7)]);
+          mt := 'JUAL ' + MarkCache[mk].Name;
+          mw := C.TextWidth(mt);
+          if mx - mw div 2 > lastRD + 6 then
+          begin
+            TextAt(mx - mw div 2, my - 9 - mh, mt, clrDown, True);
+            lastRD := mx + mw div 2;
+          end;
+        end;
+      end;
+    C.Font.Size := 8;
+    C.Brush.Style := bsSolid;
   end;
   SelectClipRgn(C.Handle, 0);
 

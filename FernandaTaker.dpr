@@ -11,6 +11,8 @@ uses
   uBtc in 'uBtc.pas',
   uDemo in 'uDemo.pas',
   uExness in 'uExness.pas',
+  uCandle in 'uCandle.pas',
+  uShot in 'uShot.pas',
   uMain in 'uMain.pas';
 
 begin
