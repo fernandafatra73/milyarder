@@ -233,6 +233,9 @@ procedure DrawCandles(C: TCanvas; R: TRect; const K: TKlines; const A: TAnalysis
 var
   mk, mx, my, mw, mh, lastRU, lastRD: Integer;
   mt: string;
+  Tg: TTargets;
+  StopP: Double;
+  StopN: string;
   n, vis, first, last, lastData, maxVis, i, m, x, bw, plotL, plotR, plotT, plotB, volT, volB, y1, y2, hov, tx: Integer;
   hi, lo, vmax, slot, v, step, zmid: Double;
   cum: array of Double;
@@ -501,6 +504,47 @@ begin
       end;
     C.Font.Size := 8;
     C.Brush.Style := bsSolid;
+  end;
+
+  { titik tunggu jual (emas) dan batas cut loss (merah), label di sisi kanan }
+  if A.Ok and (K[n - 1].C > 0) then
+  begin
+    Tg := SellTargets(A, K, StopP, StopN);
+    C.Font.Size := 8;
+    for mk := 0 to High(Tg) do
+    begin
+      mt := Format('JUAL %d  %s  (%s)  %s', [mk + 1, FmtPrice(Tg[mk].Price),
+        FmtPct((Tg[mk].Price - K[n - 1].C) / K[n - 1].C * 100), Tg[mk].Note]);
+      if (Tg[mk].Price > lo) and (Tg[mk].Price < hi) then
+      begin
+        my := Y(Tg[mk].Price);
+        C.Pen.Color := clrGold;
+        C.Pen.Style := psDash;
+        C.Pen.Width := 1;
+        C.MoveTo(plotL, my);
+        C.LineTo(plotR, my);
+        C.Pen.Style := psSolid;
+        TextAt(plotR - C.TextWidth(mt) - 6, my - 15, mt, clrGold, True);
+      end
+      else if Tg[mk].Price >= hi then   // di atas area grafik: petunjuk di tepi atas
+      begin
+        mt := '^ ' + mt + '  (di atas grafik)';
+        TextAt(plotR - C.TextWidth(mt) - 6, plotT + 3 + mk * 14, mt, clrGold, True);
+      end;
+    end;
+    if (StopP > lo) and (StopP < hi) then
+    begin
+      my := Y(StopP);
+      C.Pen.Color := clrDown;
+      C.Pen.Style := psDash;
+      C.Pen.Width := 1;
+      C.MoveTo(plotL, my);
+      C.LineTo(plotR, my);
+      C.Pen.Style := psSolid;
+      mt := Format('CUT LOSS  %s  (%s)  di bawah %s', [FmtPrice(StopP),
+        FmtPct((StopP - K[n - 1].C) / K[n - 1].C * 100), StopN]);
+      TextAt(plotR - C.TextWidth(mt) - 6, my + 3, mt, clrDown, True);
+    end;
   end;
   SelectClipRgn(C.Handle, 0);
 

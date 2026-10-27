@@ -2805,8 +2805,9 @@ var
   A: TAnalysis;
   I, Idx: Integer;
   Row: TCoinRow;
-  S, St: string;
-  Tot: Double;
+  S, St, StopN: string;
+  Tot, StopP: Double;
+  Targets: TTargets;
 begin
   A := D.A;
   if D.Err = '' then
@@ -2867,6 +2868,24 @@ begin
       L.Add(S);
       L.Add('');
     end;
+
+    L.Add(' --- TUNGGU JUAL DI TITIK BERIKUT ---');
+    Targets := SellTargets(A, FChartK, StopP, StopN);
+    for I := 0 to High(Targets) do
+      L.Add(Format(' JUAL %d : %14s %-9s %s', [I + 1, FmtPrice(Targets[I].Price),
+        DistPct(Targets[I].Price, A.Price), Targets[I].Note]));
+    if Length(Targets) = 0 then
+      L.Add(' (belum ada level di atas harga sekarang)');
+    if StopP > 0 then
+    begin
+      L.Add(Format(' CUT LOSS: %13s %-9s di bawah %s', [FmtPrice(StopP), DistPct(StopP, A.Price), StopN]));
+      if (Length(Targets) > 0) and (A.Price > StopP) then
+        L.Add(Format(' Rasio untung:rugi ke JUAL 1 = %.1f : 1', [(Targets[0].Price - A.Price) / (A.Price - StopP)]));
+    end;
+    L.Add(' Tunggu harga menyentuh JUAL 1 untuk jual sebagian, JUAL 2/3 untuk sisanya;');
+    L.Add(' jual lebih awal hanya bila muncul panah JUAL merah di grafik atau kena CUT LOSS.');
+    L.Add(' Garis emas putus-putus di grafik = titik jual, garis merah = cut loss.');
+    L.Add('');
 
     L.Add(' --- LEVEL PALING SERING MENOLAK (500 candle) ---');
     L.Add(Format(' SUPPORT TERKUAT  : %s %s  memantul naik %d kali',

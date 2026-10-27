@@ -68,7 +68,16 @@ type
     Reasons: string;
   end;
 
+type
+  TTarget = record
+    Price: Double;
+    Note: string;
+  end;
+  TTargets = array of TTarget;
+
 procedure ClearAnalysis(var A: TAnalysis);
+function SellTargets(const A: TAnalysis; const K: TKlines; out StopPrice: Double;
+  out StopNote: string): TTargets;
 function BreakoutStatus(Price, RangeHigh, RangeLow, MA9, MA25, VolRatio: Double): string;
 function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string; out EtaMin: Integer): Integer;
 function SidewaysForecast(const K: TKlines; MaxRangePct: Double; out Dir: Integer): Boolean;
@@ -323,6 +332,113 @@ begin
   else if score < 0 then Dir := -1
   else if P >= K[n - 6].C then Dir := 1   // seri: ikuti arah 5 candle terakhir
   else Dir := -1;
+end;
+
+{ Titik tunggu jual: resisten, pivot, MA di atas harga, dan target kelipatan ATR,
+  diurutkan dari yang terdekat dan digabung bila selisihnya < 0,3% (maksimal 3).
+  StopPrice = batas cut loss di bawah support terdekat. }
+function SellTargets(const A: TAnalysis; const K: TKlines; out StopPrice: Double;
+  out StopNote: string): TTargets;
+var
+  P, Atr, Best: Double;
+  Cand, M: TTargets;
+  I, J, N: Integer;
+  T: TTarget;
+
+  procedure AddUp(Pr: Double; const Nt: string);
+  begin
+    if Pr > P * 1.002 then
+    begin
+      SetLength(Cand, Length(Cand) + 1);
+      Cand[High(Cand)].Price := Pr;
+      Cand[High(Cand)].Note := Nt;
+    end;
+  end;
+
+  procedure TrySup(Pr: Double; const Nt: string);
+  begin
+    if (Pr > 0) and (Pr < P * 0.998) and (Pr > Best) then
+    begin
+      Best := Pr;
+      StopNote := Nt;
+    end;
+  end;
+
+begin
+  SetLength(Result, 0);
+  SetLength(Cand, 0);
+  StopPrice := 0;
+  StopNote := '';
+  P := A.Price;
+  if (not A.Ok) or (P <= 0) then
+    Exit;
+  N := Length(K);
+  Atr := 0;
+  if N >= 16 then
+  begin
+    for I := N - 15 to N - 2 do
+      Atr := Atr + (K[I].H - K[I].L);
+    Atr := Atr / 14;
+  end;
+
+  AddUp(A.SwingRes, 'Resisten terdekat');
+  if A.StrongResHits > 0 then
+    AddUp(A.StrongRes, Format('Resisten terkuat (ditolak %dx)', [A.StrongResHits]));
+  AddUp(A.R1, 'Pivot R1');
+  AddUp(A.R2, 'Pivot R2');
+  AddUp(A.RangeHigh, 'High range 50 candle');
+  for I := 1 to 4 do
+    if (I <> 2) and A.MAValid[I] then
+      AddUp(A.MA[I], Format('MA%d', [MAPeriods[I]]));
+  if Atr > 0 then
+  begin
+    AddUp(P + Atr, 'Target 1x ATR');
+    AddUp(P + 2 * Atr, 'Target 2x ATR');
+    AddUp(P + 3 * Atr, 'Target 3x ATR');
+    AddUp(P + 5 * Atr, 'Target 5x ATR');
+    AddUp(P + 8 * Atr, 'Target 8x ATR');
+  end;
+
+  for I := 1 to High(Cand) do   // urut harga naik
+  begin
+    T := Cand[I];
+    J := I - 1;
+    while (J >= 0) and (Cand[J].Price > T.Price) do
+    begin
+      Cand[J + 1] := Cand[J];
+      Dec(J);
+    end;
+    Cand[J + 1] := T;
+  end;
+  SetLength(M, 0);
+  for I := 0 to High(Cand) do
+    if (Length(M) > 0) and (Cand[I].Price <= M[High(M)].Price * 1.003) then
+      M[High(M)].Note := M[High(M)].Note + ' + ' + Cand[I].Note
+    else
+    begin
+      SetLength(M, Length(M) + 1);
+      M[High(M)] := Cand[I];
+    end;
+  N := Min(3, Length(M));
+  SetLength(Result, N);
+  for I := 0 to N - 1 do
+    Result[I] := M[I];
+
+  { cut loss: support terdekat di bawah harga (dikurangi 0,2%) }
+  Best := 0;
+  TrySup(A.SwingSup, 'support terdekat');
+  if A.StrongSupHits > 0 then
+    TrySup(A.StrongSup, 'support terkuat');
+  TrySup(A.S1, 'pivot S1');
+  if A.MAValid[1] then
+    TrySup(A.MA[1], 'MA25');
+  if Best > 0 then
+    StopPrice := Best * 0.998
+  else if Atr > 0 then
+  begin
+    StopPrice := P - 1.5 * Atr;
+    StopNote := '1,5x ATR';
+  end;
 end;
 
 { Gabungkan candle terbaru (U) ke grafik (K): candle dengan waktu buka sama
