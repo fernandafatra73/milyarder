@@ -35,6 +35,10 @@ type
     Offset: Integer;    // jumlah candle digeser ke masa lalu (0 = candle terbaru di kanan)
     Count: Integer;     // jumlah candle terlihat (0 = otomatis)
     Shift: Double;      // geser harga atas/bawah (pecahan tinggi grafik)
+    PriceZoom: Double;  // perbesaran skala harga (0 / 1 = normal, >1 diperbesar)
+    CurX, PlotRight: Integer;   // diisi DrawCandles: posisi kursor & tepi kanan area candle
+    ScaleDrag: Boolean;         // sedang drag di skala harga
+    DragZoom: Double;
     VisUsed, PlotW, PlotH: Integer;  // diisi DrawCandles
     AtStart: Boolean;   // diisi DrawCandles: sudah di candle paling lama yang dimuat
     Dragging: Boolean;
@@ -74,6 +78,11 @@ begin
   View.DragY := Y;
   View.DragOffset := View.Offset;
   View.DragShift := View.Shift;
+  // klik di skala harga (kanan): drag ke atas/bawah = perbesar/kecilkan skala
+  View.ScaleDrag := (View.PlotRight > 0) and (X > View.PlotRight);
+  View.DragZoom := View.PriceZoom;
+  if View.DragZoom <= 0 then
+    View.DragZoom := 1;
 end;
 
 function ViewMouseMove(var View: TChartView; X, Y: Integer): Boolean;
@@ -81,6 +90,11 @@ begin
   Result := View.Dragging;
   if not Result then
     Exit;
+  if View.ScaleDrag then
+  begin
+    View.PriceZoom := Min(30, Max(0.2, View.DragZoom * Exp((View.DragY - Y) / 120)));
+    Exit;
+  end;
   // geser kanan = lihat candle lama; geser bawah = grafik turun
   if (View.VisUsed > 0) and (View.PlotW > 0) then
     View.Offset := View.DragOffset + Round((X - View.DragX) * View.VisUsed / View.PlotW);
@@ -91,12 +105,24 @@ end;
 procedure ViewMouseUp(var View: TChartView);
 begin
   View.Dragging := False;
+  View.ScaleDrag := False;
 end;
 
 procedure ViewZoom(var View: TChartView; WheelDelta: Integer);
 var
   Base: Integer;
+  Z: Double;
 begin
+  // kursor di skala harga (kanan): roda mouse memperbesar/memperkecil skala harga
+  if (View.PlotRight > 0) and (View.CurX > View.PlotRight) then
+  begin
+    Z := View.PriceZoom;
+    if Z <= 0 then
+      Z := 1;
+    if WheelDelta > 0 then Z := Z * 1.2 else Z := Z / 1.2;
+    View.PriceZoom := Min(30, Max(0.2, Z));
+    Exit;
+  end;
   Base := View.VisUsed;
   if Base <= 0 then
     Base := 120;
@@ -208,7 +234,7 @@ var
   mk, mx, my, mw, mh, lastRU, lastRD: Integer;
   mt: string;
   n, vis, first, last, lastData, maxVis, i, m, x, bw, plotL, plotR, plotT, plotB, volT, volB, y1, y2, hov, tx: Integer;
-  hi, lo, vmax, slot, v, step: Double;
+  hi, lo, vmax, slot, v, step, zmid: Double;
   cum: array of Double;
   started: Boolean;
   S: string;
@@ -285,6 +311,9 @@ begin
   if (plotR - plotL < 50) or (plotB - plotT < 40) then
     Exit;
 
+  View.CurX := HoverX;
+  View.PlotRight := plotR;
+
   { jendela candle yang terlihat (bisa digeser & di-zoom) }
   maxVis := Max(10, (plotR - plotL) div 2);
   if View.Count > 0 then
@@ -317,9 +346,26 @@ begin
   v := (hi - lo) * 0.06;
   hi := hi + v;
   lo := lo - v;
+  if View.PriceZoom > 0 then   // perbesar/kecilkan skala harga di sekitar tengah
+  begin
+    v := (hi - lo) / 2 / View.PriceZoom;
+    zmid := (hi + lo) / 2;
+    hi := zmid + v;
+    lo := zmid - v;
+  end;
   v := (hi - lo) * View.Shift;   // geser harga atas/bawah
   hi := hi + v;
   lo := lo + v;
+
+  { kursor di skala harga: tandai area & beri petunjuk }
+  if (HoverX > plotR) and (HoverX <= R.Right) then
+  begin
+    C.Brush.Style := bsSolid;
+    C.Brush.Color := clrPanel2;
+    C.FillRect(Rect(plotR + 1, plotT - 18, R.Right, plotB));
+    C.Font.Size := 7;
+    TextAt(plotR + 5, plotT - 15, 'skala: zoom', clrGold, True);
+  end;
 
   { grid + label harga }
   C.Font.Size := 8;
