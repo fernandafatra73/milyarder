@@ -382,7 +382,7 @@ begin
   D.ReqId := FReqId;
   try
     EnsureSource;
-    K := GetKlines(FSym, FInterval, KlineLimit);
+    K := GetKlines(FSym, FInterval, ChartKlineLimit);
     D.K := K;
     D.A := Analyze(FSym, FInterval, K);
   except
@@ -601,7 +601,7 @@ begin
     end;
     for I := 0 to 3 do
       D.TF[I] := Analyze(BtcSymbol, BtcIntervals[I], GetKlines(BtcSymbol, BtcIntervals[I], KlineLimit));
-    K := GetKlines(BtcSymbol, FChartTF, KlineLimit);
+    K := GetKlines(BtcSymbol, FChartTF, ChartKlineLimit);
     D.KChart := K;
     D.AChart := Analyze(BtcSymbol, FChartTF, K);
     D.DepthOk := GetDepthUSD(BtcSymbol, D.BidUSD, D.AskUSD, D.AskWallPrice, D.AskWallUSD, D.BidWallPrice, D.BidWallUSD);

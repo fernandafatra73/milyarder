@@ -7,7 +7,7 @@ interface
 uses
   Windows, Messages, SysUtils, Classes, Graphics, Controls, Forms, StdCtrls,
   ExtCtrls, ComCtrls, CommCtrl, ImgList, Math, Dialogs, uAnalysis, uBinance, uWorkers,
-  uChart, uBtc, uDemo, uExness, uCandle, uShot, uCek;
+  uChart, uBtc, uDemo, uExness, uCandle, uShot, uCek, uLeverage;
 
 const
   WM_FT_HIDESUGGEST = WM_USER + 301;
@@ -43,8 +43,16 @@ type
     btnDemo, btnExness, btnPersen, btnBO: TPanel;
     pnlTop, pnlMarket, pnlRight, pnlBottom, pnlStatus, pnlCoinHead, pnlChart: TPanel;
     btnBtc, btnOpen, btnSide, btnSS, btnCandle: TPanel;
-    pnlCap, btnCap, btnCek: TPanel;
+    pnlCap, btnCap, btnCek, btnLev: TPanel;
     tmrCap: TTimer;
+    pnlAdvice: TPanel;
+    lblAdvice, lblAdvPlan, lblAdvWhy, lblAdvTime: TLabel;
+    btnAdvMode: TPanel;
+    FAdv: TAdvice;
+    FAdvSym, FAdvTF: string;   // koin & time frame saran terakhir
+    FAdvTime, FAdvNext, FAdvReq: TDateTime;
+    FAdvByTF: Boolean;         // True = refresh tiap candle time frame tutup, False = tiap 1 menit
+    FAdvPending: Boolean;      // menunggu analisa baru sebelum saran dihitung ulang
     pnlFrame, pnlFrameBar, pnlGrip, btnFrameClose, btnFrameMax: TPanel;
     FFrameDrag, FFrameSize, FFrameMax, FFrameInit: Boolean;
     FFramePt: TPoint;
@@ -185,7 +193,11 @@ type
     procedure btnSSClick(Sender: TObject);
     procedure btnCapClick(Sender: TObject);
     procedure btnCekClick(Sender: TObject);
+    procedure btnLevClick(Sender: TObject);
     procedure tmrCapTimer(Sender: TObject);
+    procedure btnAdvModeClick(Sender: TObject);
+    procedure UpdateAdvice;
+    procedure ShowAdviceTime;
     function CekPrice(const Sym: string; var P: Double): Boolean;
     procedure ShowSSReport(const Title: string; const A: TAnalysis; const K: TKlines;
       P: Double; const Note: string; Relative: Boolean);
@@ -261,6 +273,23 @@ begin
   if A < B then Result := -1
   else if A > B then Result := 1
   else Result := 0;
+end;
+
+{ lama satu candle (detik) dari kode time frame Binance: 1m, 5m, 1h, 4h, 1d, 1w, 1M }
+function TFSeconds(const TF: string): Integer;
+var
+  N: Integer;
+begin
+  N := StrToIntDef(Copy(TF, 1, Length(TF) - 1), 1);
+  case TF[Length(TF)] of
+    'm': Result := N * 60;
+    'h': Result := N * 3600;
+    'd': Result := N * 86400;
+    'w': Result := N * 604800;
+    'M': Result := N * 2592000;   // 30 hari
+  else
+    Result := 60;
+  end;
 end;
 
 { TMainForm }
@@ -664,7 +693,7 @@ begin
   pnlCap := TPanel.Create(Self);
   pnlCap.Parent := pnlTF;
   pnlCap.Align := alRight;
-  pnlCap.Width := 224;
+  pnlCap.Width := 352;
   pnlCap.BevelOuter := bvNone;
   pnlCap.Color := clrPanel;
   btnCap := MakeBtn(pnlCap, 4, 5, 100, 24, 'Capture', clrGold, clrBg, btnCapClick);
@@ -675,6 +704,10 @@ begin
   btnCek.Font.Size := 9;
   btnCek.Hint := 'Buka halaman Cek Grafik: tabel capture yang tersimpan';
   btnCek.ShowHint := True;
+  btnLev := MakeBtn(pnlCap, 222, 5, 124, 24, 'Hitung Leverage', clrPanel2, clrUp, btnLevClick);
+  btnLev.Font.Size := 9;
+  btnLev.Hint := 'Hitung leverage 1-100% modal: margin rasio, harga likuidasi & ketahanan modal';
+  btnLev.ShowHint := True;
   tmrCap := TTimer.Create(Self);
   tmrCap.Enabled := False;
   tmrCap.Interval := 2500;
@@ -689,6 +722,32 @@ begin
   cbCoin.OnDropDown := cbCoinDropDown;
   cbCoin.OnSelect := cbCoinSelect;
   cbCoin.OnKeyDown := cbCoinKeyDown;
+
+  { saran mending beli / jual / tunggu, dihitung ulang tiap 1 menit }
+  pnlAdvice := TPanel.Create(Self);
+  pnlAdvice.Parent := pnlRight;
+  pnlAdvice.Align := alTop;
+  pnlAdvice.Top := pnlTF.Top + pnlTF.Height;
+  pnlAdvice.Height := 62;
+  pnlAdvice.BevelOuter := bvNone;
+  pnlAdvice.Color := clrBg;
+  lblAdvice := MakeLabel(pnlAdvice, 12, 6, 'SARAN: pilih koin');
+  lblAdvice.Font.Size := 18;
+  lblAdvice.Font.Style := [fsBold];
+  lblAdvice.Font.Color := clrGold;
+  lblAdvTime := MakeLabel(pnlAdvice, 12, 42, '');
+  lblAdvTime.Font.Size := 8;
+  lblAdvPlan := MakeLabel(pnlAdvice, 420, 8, '');
+  lblAdvPlan.Font.Size := 10;
+  lblAdvPlan.Font.Style := [fsBold];
+  lblAdvPlan.Font.Color := clrText;
+  lblAdvWhy := MakeLabel(pnlAdvice, 420, 32, '');
+  lblAdvWhy.Font.Size := 9;
+  btnAdvMode := MakeBtn(pnlAdvice, 0, 0, 170, 30, 'Refresh: tiap 1 menit', clrPanel2, clrGold, btnAdvModeClick);
+  btnAdvMode.Align := alRight;
+  btnAdvMode.Font.Size := 9;
+  btnAdvMode.Hint := 'Klik untuk ganti: saran diperbarui tiap 1 menit, atau tiap candle time frame grafik tutup';
+  btnAdvMode.ShowHint := True;
 
   pnlChart := TPanel.Create(Self);
   pnlChart.Parent := pnlRight;
@@ -1232,8 +1291,92 @@ begin
   end;
 end;
 
+{ hitung ulang saran dari grafik terkini (analisa diperbarui tiap 15 detik,
+  candle terakhir tiap detik) }
+procedure TMainForm.UpdateAdvice;
+var
+  Old: string;
+begin
+  if (FSelected = '') or not FChartA.Ok or (FChartA.Symbol <> FSelected) or (Length(FChartK) < 40) then
+    Exit;
+  Old := FAdv.Head;
+  FAdv := TradeAdvice(FChartK, FChartA);
+  if (FAdvSym = FChartA.Symbol) and (FAdvTF = FChartA.Interval) and (Old <> FAdv.Head) then
+    AddAlert(FSelected, 'SARAN ' + ChartTFLabel(FChartA.Interval) + ' berubah: ' + FAdv.Head);
+  FAdvSym := FChartA.Symbol;
+  FAdvTF := FChartA.Interval;
+  FAdvTime := Now;
+  lblAdvice.Caption := FAdv.Head;
+  lblAdvice.Font.Color := FAdv.Col;
+  lblAdvPlan.Left := lblAdvice.Left + lblAdvice.Width + 24;
+  lblAdvWhy.Left := lblAdvPlan.Left;
+  lblAdvPlan.Caption := FAdv.Plan;
+  lblAdvWhy.Caption := 'Alasan: ' + FAdv.Why;
+  FAdvPending := False;
+
+  { jadwal berikutnya: 1 menit lagi, atau 3 detik setelah candle time frame ini tutup }
+  FAdvNext := Now + 1 / 1440;
+  if FAdvByTF then
+  begin
+    FAdvNext := KlineTime(FChartK[High(FChartK)].OpenTime + TFSeconds(FAdvTF) * 1000.0) + 3 / 86400;
+    if FAdvNext <= Now then
+      FAdvNext := Now + TFSeconds(FAdvTF) / 86400;
+    btnAdvMode.Caption := 'Refresh: ikut TF ' + ChartTFLabel(FAdvTF);
+  end
+  else
+    btnAdvMode.Caption := 'Refresh: tiap 1 menit';
+  ShowAdviceTime;
+end;
+
+{ tampilkan hitung mundur; saat waktunya tiba minta analisa baru dulu,
+  saran dihitung ulang begitu analisa itu datang (lihat ShowDetail) }
+procedure TMainForm.ShowAdviceTime;
+var
+  Secs: Integer;
+  S: string;
+begin
+  if (FAdvSym = '') or (FAdvSym <> FSelected) then
+  begin
+    lblAdvTime.Caption := '';
+    Exit;
+  end;
+  if Now >= FAdvNext then
+  begin
+    if not FAdvPending then
+    begin
+      FAdvPending := True;
+      FAdvReq := Now;
+      RequestDetail;
+    end
+    else if Now - FAdvReq > 20 / 86400 then
+      UpdateAdvice;   // analisa baru tidak datang: pakai data yang ada
+  end;
+  if FAdvPending then
+    S := 'memperbarui...'
+  else
+  begin
+    Secs := Round((FAdvNext - Now) * 86400);
+    if Secs < 0 then Secs := 0;
+    if Secs >= 3600 then
+      S := Format('refresh %d jam %d mnt lagi', [Secs div 3600, Secs mod 3600 div 60])
+    else if Secs >= 60 then
+      S := Format('refresh %d mnt %d dtk lagi', [Secs div 60, Secs mod 60])
+    else
+      S := Format('refresh %d dtk lagi', [Secs]);
+  end;
+  lblAdvTime.Caption := Format('%s %s  |  update %s  |  %s',
+    [FAdvSym, ChartTFLabel(FAdvTF), FormatDateTime('hh:nn:ss', FAdvTime), S]);
+end;
+
+procedure TMainForm.btnAdvModeClick(Sender: TObject);
+begin
+  FAdvByTF := not FAdvByTF;
+  UpdateAdvice;   // hitung ulang sekarang dan pasang jadwal baru
+end;
+
 procedure TMainForm.tmrLiveTimer(Sender: TObject);
 begin
+  ShowAdviceTime;
   if (FSelected = '') or (Length(FChartK) = 0) then
     Exit;
   if FLiveBusy and (GetTickCount - FLiveStart < 10000) then
@@ -2446,6 +2589,12 @@ begin
   ShowCekGrafik(CekPrice);
 end;
 
+{ kalkulator leverage memakai harga & support/resisten koin yang sedang dibuka }
+procedure TMainForm.btnLevClick(Sender: TObject);
+begin
+  ShowLeverage(FSelected, FChartA);
+end;
+
 procedure TMainForm.btnSideClick(Sender: TObject);
 begin
   if cbFilter.ItemIndex = 11 then
@@ -2877,6 +3026,8 @@ var
   Tot, StopP: Double;
   Targets: TTargets;
   Early: TEarly;
+  SmBr: TSmcBreaks;
+  SmGp: TSmcGaps;
 begin
   A := D.A;
   if D.Err = '' then
@@ -2890,6 +3041,9 @@ begin
     FChartA := A;
     FChartTitle := A.Symbol + '  ' + ChartTFLabel(A.Interval);
     pbChart.Invalidate;
+    // koin / time frame baru: saran langsung dihitung; selanjutnya sesuai jadwal
+    if FAdvPending or (FAdvSym <> A.Symbol) or (FAdvTF <> A.Interval) then
+      UpdateAdvice;
   end;
   if (D.Err <> '') or not A.Ok then
   begin
@@ -2925,6 +3079,15 @@ begin
     UpdateCoinHeader;
     L.Add(Format(' %s   |   timeframe %s   |   %s', [A.Symbol, A.Interval, FormatDateTime('hh:nn:ss', Now)]));
     L.Add('');
+    if (FAdvSym = A.Symbol) and (FAdvTF = A.Interval) then
+    begin
+      if FAdvByTF then S := 'tiap candle ' + ChartTFLabel(FAdvTF) + ' tutup' else S := 'tiap 1 menit';
+      L.Add(' SARAN SEKARANG (update ' + FormatDateTime('hh:nn:ss', FAdvTime) + ', diperbarui ' + S + '): ' + FAdv.Head);
+      if FAdv.Plan <> '' then
+        L.Add('   ' + FAdv.Plan);
+      L.Add('   Alasan: ' + FAdv.Why);
+      L.Add('');
+    end;
     L.Add(Format(' SINYAL   : %s   (skor %d)', [SignalText(A.Signal), A.Score]));
     L.Add(' Trend MA : ' + A.Trend);
     if A.Reasons <> '' then
@@ -3019,6 +3182,26 @@ begin
         end;
         L.Add(S);
       end;
+    L.Add('');
+
+    L.Add(' --- STRUKTUR PASAR: BOS / CHoCH ---');
+    FindSmc(FChartK, SmBr, SmGp);
+    if Length(SmBr) = 0 then
+      L.Add(' Belum ada BOS / CHoCH di 500 candle terakhir.')
+    else
+      for I := High(SmBr) downto Max(0, High(SmBr) - 4) do   // 5 terbaru
+        with SmBr[I] do
+        begin
+          if Choch then S := 'CHoCH' else S := 'BOS  ';
+          if Dir > 0 then S := S + ' NAIK ' else S := S + ' TURUN';
+          if Choch then St := 'tren berpotensi berubah (awal pembalikan)'
+          else St := 'tren masih lanjut (konfirmasi kelanjutan)';
+          L.Add(Format(' %s  tembus %14s  %3d candle lalu  -> %s',
+            [S, FmtPrice(Price), High(FChartK) - ToIdx, St]));
+        end;
+    L.Add('');
+    for I := 0 to High(SmcNotes) do
+      L.Add(' ' + SmcNotes[I]);
     L.Add('');
 
     L.Add(' --- WARNING ---');

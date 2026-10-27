@@ -104,6 +104,11 @@ begin
   T(1, -1, 'Rising Wedge', 'Baji menaik menyempit, tembus ke bawah: pembalikan turun');
   T(1, 1, 'Bull Flag', 'Kenaikan tajam (tiang), konsolidasi sempit, lalu tembus atas: lanjut naik');
   T(1, -1, 'Bear Flag', 'Penurunan tajam (tiang), konsolidasi sempit, lalu tembus bawah: lanjut turun');
+  { --- zona supply / demand --- }
+  T(1, 1, 'DBR (Drop-Base-Rally)', 'Turun tajam, base sempit, lalu naik kuat: zona demand, pembalikan naik. Beli saat harga kembali ke base');
+  T(1, 1, 'RBR (Rally-Base-Rally)', 'Naik, base sempit, lalu naik lagi: zona demand, tren naik lanjut. Beli saat retest base');
+  T(1, -1, 'RBD (Rally-Base-Drop)', 'Naik tajam, base sempit, lalu turun kuat: zona supply, pembalikan turun. Jual saat harga kembali ke base');
+  T(1, -1, 'DBD (Drop-Base-Drop)', 'Turun, base sempit, lalu turun lagi: zona supply, tren turun lanjut. Jual saat retest base');
   { --- strategi indikator --- }
   T(2, 1, 'EMA 9/21 Golden Cross', 'EMA9 memotong EMA21 ke atas: momentum naik');
   T(2, -1, 'EMA 9/21 Death Cross', 'EMA9 memotong EMA21 ke bawah: momentum turun');
@@ -1009,6 +1014,11 @@ begin
   Sh('Rising Wedge', '', '0,10;12,30;22,18;40,50;50,38;65,60;72,55;95,8|0,8,70,52/12,32,70,64');
   Sh('Bull Flag', '', '0,10;25,85;32,75;40,80;48,68;56,74;64,62;90,95|25,88,62,66/32,72,62,52');
   Sh('Bear Flag', '', '0,90;25,15;32,25;40,20;48,32;56,26;64,38;90,5|25,12,62,34/32,28,62,48');
+  { supply / demand: garis harga | batas atas & bawah zona base, diperpanjang ke kanan }
+  Sh('DBR (Drop-Base-Rally)', '', '0,90;12,60;25,30;33,35;41,27;49,34;57,28;72,62;92,94|25,36,95,36/25,25,95,25');
+  Sh('RBR (Rally-Base-Rally)', '', '0,10;12,35;25,60;33,55;41,63;49,56;57,62;72,80;92,95|25,65,95,65/25,53,95,53');
+  Sh('RBD (Rally-Base-Drop)', '', '0,10;12,40;25,70;33,65;41,73;49,66;57,72;72,40;92,6|25,75,95,75/25,63,95,63');
+  Sh('DBD (Drop-Base-Drop)', '', '0,90;12,65;25,40;33,45;41,37;49,44;57,38;72,20;92,5|25,47,95,47/25,35,95,35');
 end;
 
 { pecah S pada pemisah Sep ke dalam L }

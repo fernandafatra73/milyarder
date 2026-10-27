@@ -28,6 +28,13 @@ const
   clrMA25    = $009343E8;  // pink
   clrMA99    = $00E8CF00;  // cyan
   clrMA200   = $00FF6CA6;  // ungu
+  clrMA500   = $003C8CFF;  // oranye
+  clrMA700   = $00FF9B5B;  // biru
+
+  { garis MA di grafik }
+  ChartMACount = 6;
+  ChartMAPeriods: array[0..ChartMACount - 1] of Integer = (9, 25, 99, 200, 500, 700);
+  ChartMAColors: array[0..ChartMACount - 1] of TColor = (clrGold, clrMA25, clrMA99, clrMA200, clrMA500, clrMA700);
 
 type
   { Posisi tampilan grafik: digeser/di-zoom dengan mouse }
@@ -53,6 +60,46 @@ type
 var
   ChartPatternHook: TPatternHook = nil;
 
+type
+  { kesimpulan arah koin (BULLISH / BEARISH / SIDEWAYS) }
+  TVerdict = record
+    Score: Integer;
+    Head, Detail: string;
+    Col: TColor;
+  end;
+
+  { saran saat ini: mending beli, jual, atau tunggu }
+  TAdvice = record
+    Action: Integer;          // 1 beli, -1 jual, 0 tunggu
+    Head, Plan, Why: string;
+    Col: TColor;
+    Verdict: TVerdict;
+  end;
+
+  { Smart Money Concepts }
+  TSmcBreak = record
+    FromIdx, ToIdx, Dir: Integer;   // swing yang ditembus -> candle penembus; Dir +1 naik, -1 turun
+    Price: Double;
+    Choch: Boolean;                 // True = CHoCH (arah struktur berbalik), False = BOS (lanjut)
+  end;
+  TSmcGap = record
+    StartIdx, EndIdx, Dir: Integer; // EndIdx = candle yang menutup gap (bila Filled)
+    Top, Bot: Double;
+    Filled: Boolean;
+  end;
+  TSmcBreaks = array of TSmcBreak;
+  TSmcGaps = array of TSmcGap;
+
+const
+  { keterangan BOS / CHoCH untuk grafik & analisa }
+  SmcNotes: array[0..2] of string = (
+    'Arah tren   : BOS = tren masih lanjut, CHoCH = tren berpotensi berubah',
+    'Tujuan      : BOS untuk konfirmasi kelanjutan, CHoCH untuk deteksi awal pembalikan',
+    'Posisi chart: BOS biasanya muncul setelah konsolidasi kecil, CHoCH sering di area puncak / dasar tren');
+
+procedure FindSmc(const K: TKlines; var Br: TSmcBreaks; var Gp: TSmcGaps);
+function MarketVerdict(const K: TKlines; const A: TAnalysis): TVerdict;
+function TradeAdvice(const K: TKlines; const A: TAnalysis): TAdvice;
 procedure DrawCandles(C: TCanvas; R: TRect; const K: TKlines; const A: TAnalysis;
   HoverX: Integer; const Title: string; var View: TChartView);
 procedure DrawSpark(C: TCanvas; R: TRect; const V: array of Double; Bg: TColor);
@@ -243,9 +290,299 @@ begin
     end;
 end;
 
+{ ---------- Smart Money Concepts: FVG, BOS, CHoCH ---------- }
+
+const
+  SmcSwing = 3;      // swing high/low: lebih tinggi/rendah dari 3 candle kiri & kanan
+  SmcBack = 500;     // candle terakhir yang dianalisa
+  SmcMinGap = 0.25;  // FVG minimal 0,25x rata-rata panjang candle
+
+{ BOS: harga menutup melewati swing searah struktur sebelumnya.
+  CHoCH: penembusan pertama yang berlawanan dengan struktur sebelumnya.
+  FVG: celah 3 candle - low candle ke-3 di atas high candle ke-1 (bullish),
+  atau high candle ke-3 di bawah low candle ke-1 (bearish). }
+procedure FindSmc(const K: TKlines; var Br: TSmcBreaks; var Gp: TSmcGaps);
+var
+  n, st, i, j, m, Trend, ShIdx, SlIdx: Integer;
+  ShP, SlP, Rng: Double;
+  ShLive, SlLive, PivH, PivL: Boolean;
+
+  procedure AddBreak(FromI, D: Integer; P: Double);
+  var
+    B: TSmcBreak;
+  begin
+    B.FromIdx := FromI;
+    B.ToIdx := i;
+    B.Dir := D;
+    B.Price := P;
+    B.Choch := (Trend <> 0) and (Trend <> D);
+    SetLength(Br, Length(Br) + 1);
+    Br[High(Br)] := B;
+    Trend := D;
+  end;
+
+  procedure AddGap(Dir: Integer; Top, Bot: Double);
+  var
+    G: TSmcGap;
+    j: Integer;
+  begin
+    G.StartIdx := i - 1;
+    G.Dir := Dir;
+    G.Top := Top;
+    G.Bot := Bot;
+    G.Filled := False;
+    G.EndIdx := n - 1;
+    for j := i + 1 to n - 1 do
+      if ((Dir > 0) and (K[j].L <= Bot)) or ((Dir < 0) and (K[j].H >= Top)) then
+      begin
+        G.Filled := True;
+        G.EndIdx := j;
+        Break;
+      end;
+    SetLength(Gp, Length(Gp) + 1);
+    Gp[High(Gp)] := G;
+  end;
+
+begin
+  SetLength(Br, 0);
+  SetLength(Gp, 0);
+  n := Length(K);
+  if n < 20 then
+    Exit;
+  st := Max(0, n - SmcBack);
+
+  { struktur pasar }
+  Trend := 0;
+  ShLive := False;
+  SlLive := False;
+  ShIdx := -1;
+  SlIdx := -1;
+  ShP := 0;
+  SlP := 0;
+  for i := st + 2 * SmcSwing to n - 1 do
+  begin
+    j := i - SmcSwing;   // swing di j baru pasti setelah 3 candle kanannya selesai
+    PivH := True;
+    PivL := True;
+    for m := j - SmcSwing to j + SmcSwing do
+    begin
+      if m = j then Continue;
+      if ((m < j) and (K[m].H >= K[j].H)) or ((m > j) and (K[m].H > K[j].H)) then PivH := False;
+      if ((m < j) and (K[m].L <= K[j].L)) or ((m > j) and (K[m].L < K[j].L)) then PivL := False;
+    end;
+    if PivH then
+    begin
+      ShIdx := j; ShP := K[j].H; ShLive := True;
+    end;
+    if PivL then
+    begin
+      SlIdx := j; SlP := K[j].L; SlLive := True;
+    end;
+    if ShLive and (K[i].C > ShP) then
+    begin
+      AddBreak(ShIdx, 1, ShP);
+      ShLive := False;
+    end;
+    if SlLive and (K[i].C < SlP) then
+    begin
+      AddBreak(SlIdx, -1, SlP);
+      SlLive := False;
+    end;
+  end;
+
+  { fair value gap }
+  Rng := 0;
+  for i := st to n - 1 do
+    Rng := Rng + (K[i].H - K[i].L);
+  Rng := Rng / (n - st);
+  for i := st + 2 to n - 1 do
+    if (K[i].L > K[i - 2].H) and (K[i].L - K[i - 2].H >= Rng * SmcMinGap) then
+      AddGap(1, K[i].L, K[i - 2].H)
+    else if (K[i].H < K[i - 2].L) and (K[i - 2].L - K[i].H >= Rng * SmcMinGap) then
+      AddGap(-1, K[i - 2].L, K[i].H);
+end;
+
+{ Skor arah = trend MA (-5..+5) + struktur terakhir BOS/CHoCH (+-2)
+  + dominasi volume beli/jual (+-1) + prakiraan gerak segera (+-1) }
+function MarketVerdict(const K: TKlines; const A: TAnalysis): TVerdict;
+var
+  Br: TSmcBreaks;
+  Gp: TSmcGaps;
+  Er: TEarly;
+  S: string;
+begin
+  Result.Score := 0;
+  Result.Head := 'SIDEWAYS';
+  Result.Detail := '';
+  Result.Col := clrGold;
+  if not A.Ok or (Length(K) < 40) then
+    Exit;
+  Result.Score := A.TrendScore;
+  Result.Detail := 'MA ' + IntToStr(A.TrendScore);
+  FindSmc(K, Br, Gp);
+  if Length(Br) > 0 then
+  begin
+    Inc(Result.Score, 2 * Br[High(Br)].Dir);
+    if Br[High(Br)].Choch then S := 'CHoCH' else S := 'BOS';
+    if Br[High(Br)].Dir > 0 then S := S + ' naik' else S := S + ' turun';
+    Result.Detail := Result.Detail + '   struktur ' + S;
+  end;
+  if A.BuyPct >= 55 then Inc(Result.Score) else if A.BuyPct <= 45 then Dec(Result.Score);
+  if A.BuyPct > 0 then
+    Result.Detail := Result.Detail + Format('   beli %.0f%%', [A.BuyPct]);
+  Er := EarlyMove(A, K);
+  Inc(Result.Score, Sign(Er.Dir));
+  if Result.Score >= 5 then begin Result.Head := 'BULLISH KUAT'; Result.Col := clrUp; end
+  else if Result.Score >= 2 then begin Result.Head := 'BULLISH'; Result.Col := clrUp; end
+  else if Result.Score <= -5 then begin Result.Head := 'BEARISH KUAT'; Result.Col := clrDown; end
+  else if Result.Score <= -2 then begin Result.Head := 'BEARISH'; Result.Col := clrDown; end;
+  if Result.Score > 0 then S := '+' else S := '';
+  Result.Detail := 'skor ' + S + IntToStr(Result.Score) + '   ' + Result.Detail;
+end;
+
+function PctTo(Level, P: Double): string;
+begin
+  Result := FmtPrice(Level) + ' (' + FmtPct((Level - P) / P * 100) + ')';
+end;
+
+{ Saran saat ini dari arah koin + jarak ke support/resisten + FVG terdekat:
+  bullish dan masih ada ruang ke resisten -> BELI; bearish dan masih ada ruang
+  ke support -> JUAL; mepet level atau sideways -> TUNGGU di level yang jelas. }
+function TradeAdvice(const K: TKlines; const A: TAnalysis): TAdvice;
+const
+  NearPct = 0.5;   // "mepet" level bila jaraknya < 0,5%
+var
+  Br: TSmcBreaks;
+  Gp: TSmcGaps;
+  n, i: Integer;
+  P, Sup, Res, DSup, DRes, FbTop, FbBot, FsTop, FsBot, SL, TP: Double;
+
+  procedure SetPlan(Entry, Stop, Target: Double);
+  begin
+    Result.Plan := 'Masuk ' + FmtPrice(Entry);
+    if Stop > 0 then Result.Plan := Result.Plan + '   |   Cut loss ' + PctTo(Stop, Entry);
+    if Target > 0 then Result.Plan := Result.Plan + '   |   Target ' + PctTo(Target, Entry);
+    if (Stop > 0) and (Target > 0) and (Abs(Entry - Stop) > 0) then
+      Result.Plan := Result.Plan + Format('   |   untung:rugi %.1f : 1', [Abs(Target - Entry) / Abs(Entry - Stop)]);
+  end;
+
+begin
+  Result.Action := 0;
+  Result.Head := 'TUNGGU';
+  Result.Plan := '';
+  Result.Why := '';
+  Result.Col := clrGold;
+  Result.Verdict := MarketVerdict(K, A);
+  n := Length(K);
+  if not A.Ok or (n < 40) then
+  begin
+    Result.Why := 'data grafik belum cukup';
+    Exit;
+  end;
+  P := K[n - 1].C;
+
+  { support di bawah & resisten di atas harga terkini }
+  Sup := 0;
+  if (A.SwingSup > 0) and (A.SwingSup < P) then Sup := A.SwingSup
+  else if (A.StrongSup > 0) and (A.StrongSup < P) then Sup := A.StrongSup
+  else if (A.S1 > 0) and (A.S1 < P) then Sup := A.S1;
+  Res := 0;
+  if A.SwingRes > P then Res := A.SwingRes
+  else if A.StrongRes > P then Res := A.StrongRes
+  else if A.R1 > P then Res := A.R1;
+  if Sup > 0 then DSup := (P - Sup) / P * 100 else DSup := 100;
+  if Res > 0 then DRes := (Res - P) / P * 100 else DRes := 100;
+
+  { FVG belum terisi terdekat: bullish di bawah harga, bearish di atas harga }
+  FindSmc(K, Br, Gp);
+  FbTop := 0; FbBot := 0; FsTop := 0; FsBot := 0;
+  for i := 0 to High(Gp) do
+    if not Gp[i].Filled then
+      if (Gp[i].Dir > 0) and (Gp[i].Top < P) and (Gp[i].Top > FbTop) then
+      begin
+        FbTop := Gp[i].Top; FbBot := Gp[i].Bot;
+      end
+      else if (Gp[i].Dir < 0) and (Gp[i].Bot > P) and ((FsBot = 0) or (Gp[i].Bot < FsBot)) then
+      begin
+        FsTop := Gp[i].Top; FsBot := Gp[i].Bot;
+      end;
+
+  Result.Why := Result.Verdict.Head + ' (' + Result.Verdict.Detail + ')';
+  if A.Signal <> '' then
+    Result.Why := Result.Why + '   sinyal analisa ' + A.Signal;
+
+  if Result.Verdict.Score >= 2 then
+  begin
+    if (DRes < NearPct) and (Result.Verdict.Score < 5) then
+    begin
+      Result.Head := 'TUNGGU - bullish tapi mepet resisten';
+      if FbTop > 0 then
+        Result.Plan := 'Beli saat turun ke FVG ' + PctTo(FbTop, P) + ' atau support ' + PctTo(Sup, P)
+      else if Sup > 0 then
+        Result.Plan := 'Beli saat turun ke support ' + PctTo(Sup, P)
+      else
+        Result.Plan := '';
+      Result.Plan := Result.Plan + '   |   atau beli bila candle menutup di atas resisten ' + PctTo(Res, P);
+    end
+    else
+    begin
+      Result.Action := 1;
+      Result.Head := 'BELI';
+      Result.Col := clrUp;
+      if Sup > 0 then SL := Sup * 0.997
+      else if FbBot > 0 then SL := FbBot * 0.997
+      else SL := P * 0.98;
+      if Res > 0 then TP := Res else TP := P + 2 * (P - SL);
+      SetPlan(P, SL, TP);
+    end;
+  end
+  else if Result.Verdict.Score <= -2 then
+  begin
+    if (DSup < NearPct) and (Result.Verdict.Score > -5) then
+    begin
+      Result.Head := 'TUNGGU - bearish tapi mepet support';
+      if FsBot > 0 then
+        Result.Plan := 'Jual saat naik ke FVG ' + PctTo(FsBot, P) + ' atau resisten ' + PctTo(Res, P)
+      else if Res > 0 then
+        Result.Plan := 'Jual saat naik ke resisten ' + PctTo(Res, P)
+      else
+        Result.Plan := '';
+      Result.Plan := Result.Plan + '   |   atau jual bila candle menutup di bawah support ' + PctTo(Sup, P);
+    end
+    else
+    begin
+      Result.Action := -1;
+      Result.Head := 'JUAL';
+      Result.Col := clrDown;
+      if Res > 0 then SL := Res * 1.003
+      else if FsTop > 0 then SL := FsTop * 1.003
+      else SL := P * 1.02;
+      if Sup > 0 then TP := Sup else TP := P - 2 * (SL - P);
+      SetPlan(P, SL, TP);
+      Result.Plan := Result.Plan + '   (punya koin: jual/kurangi; futures: short)';
+    end;
+  end
+  else
+  begin
+    Result.Head := 'TUNGGU - belum ada arah jelas';
+    Result.Plan := '';
+    if Sup > 0 then Result.Plan := 'Beli dekat support ' + PctTo(Sup, P);
+    if Res > 0 then
+    begin
+      if Result.Plan <> '' then Result.Plan := Result.Plan + '   |   ';
+      Result.Plan := Result.Plan + 'jual dekat resisten ' + PctTo(Res, P);
+    end;
+  end;
+end;
+
 procedure DrawCandles(C: TCanvas; R: TRect; const K: TKlines; const A: TAnalysis;
   HoverX: Integer; const Title: string; var View: TChartView);
 var
+  Vd: TVerdict;
+  SmBr: TSmcBreaks;
+  SmGp: TSmcGaps;
+  sx1, sx2, sy1, sy2: Integer;
+  sCol: TColor;
   mk, mx, my, mw, mh, lastRU, lastRD: Integer;
   mt: string;
   Tg: TTargets;
@@ -267,8 +604,6 @@ var
   started: Boolean;
   S: string;
   Kc: TKline;
-  maIdx: array[0..3] of Integer;
-  maCol: array[0..3] of TColor;
 
   function Y(P: Double): Integer;
   begin
@@ -427,6 +762,42 @@ begin
 
   { candle: hijau naik, merah turun }
   IntersectClipRect(C.Handle, plotL, plotT, plotR, plotB);
+
+  { FVG di belakang candle: kotak penuh = belum terisi (diperpanjang ke kanan),
+    garis titik = sudah terisi harga }
+  FindSmc(K, SmBr, SmGp);
+  C.Font.Size := 7;
+  for mk := 0 to High(SmGp) do
+    with SmGp[mk] do
+    begin
+      if (EndIdx < first) or (StartIdx > lastData) then Continue;
+      if (Top <= lo) or (Bot >= hi) then Continue;
+      sx1 := XC(StartIdx) - bw div 2;
+      if Filled then sx2 := XC(EndIdx) else sx2 := plotR;
+      sy1 := Y(Top);
+      sy2 := Y(Bot);
+      if sy2 - sy1 < 2 then sy2 := sy1 + 2;
+      if Dir > 0 then sCol := clrUp else sCol := clrDown;
+      if Filled then
+      begin
+        C.Brush.Style := bsClear;
+        C.Pen.Color := clrBorder;
+        C.Pen.Style := psDot;
+        C.Rectangle(sx1, sy1, sx2, sy2 + 1);
+        C.Pen.Style := psSolid;
+      end
+      else
+      begin
+        C.Brush.Style := bsSolid;
+        if Dir > 0 then C.Brush.Color := clrUpFill else C.Brush.Color := clrDownFill;
+        C.FillRect(Rect(sx1, sy1, sx2, sy2 + 1));
+        if Dir > 0 then mt := 'FVG bullish' else mt := 'FVG bearish';
+        TextAt(sx1 + 3, sy1 + (sy2 - sy1 - C.TextHeight(mt)) div 2, mt, sCol, True);
+      end;
+    end;
+  C.Font.Size := 8;
+  C.Brush.Style := bsSolid;
+
   for i := first to lastData do
   begin
     x := XC(i);
@@ -455,17 +826,15 @@ begin
   cum[0] := 0;
   for i := 0 to n - 1 do
     cum[i + 1] := cum[i] + K[i].C;
-  maIdx[0] := 0; maIdx[1] := 1; maIdx[2] := 3; maIdx[3] := 4;
-  maCol[0] := clrGold; maCol[1] := clrMA25; maCol[2] := clrMA99; maCol[3] := clrMA200;
-  for m := 0 to 3 do
+  for m := 0 to ChartMACount - 1 do
   begin
-    C.Pen.Color := maCol[m];
+    C.Pen.Color := ChartMAColors[m];
     C.Pen.Width := 1;
     started := False;
     for i := first to lastData do
-      if i >= MAPeriods[maIdx[m]] - 1 then
+      if i >= ChartMAPeriods[m] - 1 then
       begin
-        v := (cum[i + 1] - cum[i + 1 - MAPeriods[maIdx[m]]]) / MAPeriods[maIdx[m]];
+        v := (cum[i + 1] - cum[i + 1 - ChartMAPeriods[m]]) / ChartMAPeriods[m];
         if started then
           C.LineTo(XC(i), Y(v))
         else
@@ -475,6 +844,60 @@ begin
         end;
       end;
   end;
+
+  { BOS / CHoCH: garis putus dari swing yang ditembus ke candle penembus }
+  C.Font.Size := 7;
+  for mk := 0 to High(SmBr) do
+    with SmBr[mk] do
+    begin
+      if (ToIdx < first) or (FromIdx > lastData) then Continue;
+      if (Price <= lo) or (Price >= hi) then Continue;
+      sx1 := XC(FromIdx);
+      sx2 := XC(ToIdx);
+      sy1 := Y(Price);
+      if Dir > 0 then sCol := clrUp else sCol := clrDown;
+      C.Pen.Color := sCol;
+      C.Pen.Style := psDash;
+      C.Pen.Width := 1;
+      C.MoveTo(sx1, sy1);
+      C.LineTo(sx2, sy1);
+      C.Pen.Style := psSolid;
+      if Choch then mt := 'CHoCH - potensi balik arah' else mt := 'BOS - tren lanjut';
+      mw := C.TextWidth(mt);
+      if Dir > 0 then
+        sy2 := sy1 - C.TextHeight(mt) - 1   // tembus ke atas: label di atas garis
+      else
+        sy2 := sy1 + 1;
+      if Choch then
+        TextAt((sx1 + sx2 - mw) div 2, sy2, mt, clrGold, True)
+      else
+        TextAt((sx1 + sx2 - mw) div 2, sy2, mt, sCol, True);
+    end;
+
+  { keterangan BOS / CHoCH di pojok kiri bawah grafik }
+  if Length(SmBr) > 0 then
+  begin
+    C.Font.Size := 7;
+    C.Font.Style := [];
+    bwid := 0;
+    for bi := 0 to High(SmcNotes) do
+      bwid := Max(bwid, C.TextWidth(SmcNotes[bi]));
+    bx := plotL + 8;
+    by := plotB - (Length(SmcNotes) + 1) * 12 - 8;
+    C.Brush.Style := bsSolid;
+    C.Brush.Color := clrBg;
+    C.Pen.Color := clrBorder;
+    C.Pen.Style := psSolid;
+    C.Pen.Width := 1;
+    C.Rectangle(bx - 5, by - 3, bx + bwid + 7, by + (Length(SmcNotes) + 1) * 12 + 3);
+    TextAt(bx, by, 'BOS', clrUp, True);
+    TextAt(bx + C.TextWidth('BOS '), by, '/', clrDim, True);
+    TextAt(bx + C.TextWidth('BOS / '), by, 'CHoCH', clrGold, True);
+    TextAt(bx + C.TextWidth('BOS / CHoCH '), by, '(struktur pasar)', clrDim, False);
+    for bi := 0 to High(SmcNotes) do
+      TextAt(bx, by + (bi + 1) * 12, SmcNotes[bi], clrText, False);
+  end;
+  C.Font.Size := 8;
 
   { support / resisten }
   if A.Ok then
@@ -617,6 +1040,36 @@ begin
     for bi := 0 to bln - 1 do
       TextAt(bx, by + bi * 14, BLines[bi], BCols[bi], bi = 0);
   end;
+
+  { kesimpulan arah koin: BULLISH / BEARISH dengan tulisan besar di tengah atas }
+  if A.Ok and (n >= 40) then
+  begin
+    Vd := MarketVerdict(K, A);
+    mt := Vd.Head;
+    bs := Vd.Detail;
+    sCol := Vd.Col;
+    C.Font.Size := 22;
+    C.Font.Style := [fsBold];
+    mw := C.TextWidth(mt);
+    mh := C.TextHeight(mt);
+    C.Font.Size := 8;
+    C.Font.Style := [];
+    bwid := Max(mw, C.TextWidth(bs)) + 28;
+    bx := (plotL + plotR - bwid) div 2;
+    by := plotT + 6;
+    C.Brush.Style := bsSolid;
+    C.Brush.Color := clrBg;
+    C.Pen.Color := sCol;
+    C.Pen.Style := psSolid;
+    C.Pen.Width := 2;
+    C.RoundRect(bx, by, bx + bwid, by + mh + 24, 10, 10);
+    C.Pen.Width := 1;
+    C.Font.Size := 22;
+    TextAt(bx + (bwid - mw) div 2, by + 2, mt, sCol, True);
+    C.Font.Size := 8;
+    TextAt(bx + (bwid - C.TextWidth(bs)) div 2, by + mh + 4, bs, clrDim, False);
+    C.Brush.Style := bsSolid;
+  end;
   SelectClipRgn(C.Handle, 0);
 
   { tag harga support / resisten di skala kanan (hindari tumpang tindih) }
@@ -698,12 +1151,21 @@ begin
   TextAt(R.Left + 10, R.Top + 4, Title, clrGold, True);
   tx := R.Left + 14 + C.TextWidth(Title);
   C.Font.Size := 8;
-  TextAt(tx, R.Top + 8, 'MA9', clrGold, True);
-  TextAt(tx + 34, R.Top + 8, 'MA25', clrMA25, True);
-  TextAt(tx + 74, R.Top + 8, 'MA99', clrMA99, True);
-  TextAt(tx + 114, R.Top + 8, 'MA200', clrMA200, True);
+  for m := 0 to ChartMACount - 1 do
+  begin
+    S := 'MA' + IntToStr(ChartMAPeriods[m]);
+    TextAt(tx, R.Top + 8, S, ChartMAColors[m], True);
+    Inc(tx, C.TextWidth(S) + 8);
+  end;
+  Inc(tx, 8);
+  TextAt(tx, R.Top + 8, 'FVG', clrUp, True);
+  Inc(tx, C.TextWidth('FVG') + 8);
+  TextAt(tx, R.Top + 8, 'BOS', clrText, True);
+  Inc(tx, C.TextWidth('BOS') + 8);
+  TextAt(tx, R.Top + 8, 'CHoCH', clrGold, True);
+  Inc(tx, C.TextWidth('CHoCH'));
   S := 'drag = geser   scroll = zoom   klik 2x = reset';
-  if plotR - C.TextWidth(S) > tx + 170 then
+  if plotR - C.TextWidth(S) > tx + 20 then
     TextAt(plotR - C.TextWidth(S), R.Top + 8, S, clrBorder + $00202020, False);
   if hov >= 0 then Kc := K[hov];
   if Kc.O > 0 then v := (Kc.C - Kc.O) / Kc.O * 100 else v := 0;

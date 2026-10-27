@@ -153,6 +153,9 @@ var
   Bucket, LastBucket: Int64;
 begin
   Raw := GetKlines(Sym, '5m', Min(Limit * 2, 1000), EndTime);
+  // satu permintaan maksimal 1000 candle: ambil halaman sebelumnya bila perlu lebih
+  if (Limit * 2 > 1000) and (Length(Raw) >= 1000) then
+    PrependKlines(Raw, GetKlines(Sym, '5m', Min(Limit * 2 - 1000, 1000), Raw[0].OpenTime - 1));
   SetLength(Result, Length(Raw));
   N := 0;
   LastBucket := -1;

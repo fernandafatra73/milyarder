@@ -14,6 +14,7 @@ uses
   uCandle in 'uCandle.pas',
   uShot in 'uShot.pas',
   uCek in 'uCek.pas',
+  uLeverage in 'uLeverage.pas',
   uMain in 'uMain.pas';
 
 begin

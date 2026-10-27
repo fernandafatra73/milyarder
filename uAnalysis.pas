@@ -13,6 +13,7 @@ const
   MAPeriods: array[0..MACount - 1] of Integer = (9, 25, 44, 99, 200, 650);
   CrossLookback = 10;   // cross dihitung "baru" bila terjadi dalam 10 candle terakhir
   KlineLimit = 700;     // cukup untuk MA650
+  ChartKlineLimit = 1000;   // grafik: cukup untuk garis MA700 (batas maksimal Binance spot)
 
   // time frame untuk deteksi sideways + prediksi arah, dan batas lebar range
   // (% dari 30 candle terakhir) agar masih dianggap sideways
