@@ -17,6 +17,7 @@ const
   WM_FT_LIVE    = WM_USER + 206;
   WM_FT_OLDER   = WM_USER + 207;
   WM_FT_PREBO   = WM_USER + 208;
+  WM_FT_SIDE    = WM_USER + 209;
 
   ScanInterval = '1h';
   ScanPerCycle = 12;
@@ -53,7 +54,7 @@ type
     ReqId: Integer;
     A: TAnalysis;
     K: TKlines;
-    BidUSD, AskUSD: Double;
+    BidUSD, AskUSD, AskWallPrice, AskWallUSD, BidWallPrice, BidWallUSD: Double;
     DepthOk: Boolean;
     Err: string;
   end;
@@ -71,7 +72,7 @@ type
     TF: array[0..3] of TAnalysis;
     KChart: TKlines;      // candle untuk grafik (time frame pilihan)
     AChart: TAnalysis;
-    BidUSD, AskUSD: Double;
+    BidUSD, AskUSD, AskWallPrice, AskWallUSD, BidWallPrice, BidWallUSD: Double;
     DepthOk: Boolean;
   end;
 
@@ -132,11 +133,11 @@ type
   TPreBoData = class
   public
     Sym, Note, Err: string;
-    Chance: Integer;
+    Chance, EtaMin: Integer;
     Last: Boolean;   // pesan terakhir dari satu putaran
   end;
 
-  { Analisa candle 5 menit untuk koin yang dekat resisten (peluang breakout) }
+  { Analisa candle 1 menit untuk koin yang dekat resisten (peluang breakout) }
   TPreBoThread = class(TThread)
   private
     FWnd: HWND;
@@ -146,6 +147,25 @@ type
     procedure Execute; override;
   public
     constructor Create(AWnd: HWND; const Syms: array of string; const Highs: array of Double);
+  end;
+
+  TSideData = class
+  public
+    Sym: string;
+    Dir: array[0..SideTFCount - 1] of Integer;   // 0 = tidak sideways, +1 prediksi naik, -1 turun
+    Ok: Boolean;
+    Last: Boolean;   // pesan terakhir dari satu putaran
+  end;
+
+  { Cek sideways + prediksi arah di 1m/5m/10m/15m/30m/1j untuk koin pilihan }
+  TSideThread = class(TThread)
+  private
+    FWnd: HWND;
+    FSyms: array of string;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AWnd: HWND; const Syms: array of string);
   end;
 
   TBtcThread = class(TThread)
@@ -384,7 +404,7 @@ begin
   if D2 <> nil then
   begin
     try
-      D2.DepthOk := GetDepthUSD(FSym, D2.BidUSD, D2.AskUSD);
+      D2.DepthOk := GetDepthUSD(FSym, D2.BidUSD, D2.AskUSD, D2.AskWallPrice, D2.AskWallUSD, D2.BidWallPrice, D2.BidWallUSD);
     except
     end;
     if D2.DepthOk then
@@ -426,8 +446,8 @@ begin
     D := TPreBoData.Create;
     D.Sym := FSyms[I];
     try
-      K := GetKlines(FSyms[I], '5m', 60);
-      D.Chance := BreakoutChance(K, FHigh[I], D.Note);
+      K := GetKlines(FSyms[I], '1m', 100);
+      D.Chance := BreakoutChance(K, FHigh[I], D.Note, D.EtaMin);
     except
       on E: Exception do
         D.Err := E.Message;
@@ -438,6 +458,51 @@ begin
   D := TPreBoData.Create;
   D.Last := True;
   PostObj(FWnd, WM_FT_PREBO, D);
+end;
+
+{ TSideThread }
+
+constructor TSideThread.Create(AWnd: HWND; const Syms: array of string);
+var
+  I: Integer;
+begin
+  FWnd := AWnd;
+  SetLength(FSyms, Length(Syms));
+  for I := 0 to High(Syms) do
+    FSyms[I] := Syms[I];
+  FreeOnTerminate := True;
+  inherited Create(False);
+end;
+
+procedure TSideThread.Execute;
+var
+  I, T, Dir: Integer;
+  D: TSideData;
+  K: TKlines;
+begin
+  EnsureSource;
+  for I := 0 to High(FSyms) do
+  begin
+    if Terminated then
+      Break;
+    D := TSideData.Create;
+    D.Sym := FSyms[I];
+    for T := 0 to SideTFCount - 1 do
+    begin
+      try
+        K := GetKlines(FSyms[I], SideTFApi[T], 60);
+        if SidewaysForecast(K, SideMaxRange[T], Dir) then
+          D.Dir[T] := Dir;
+        D.Ok := True;
+      except
+      end;
+      Sleep(60);
+    end;
+    PostObj(FWnd, WM_FT_SIDE, D);
+  end;
+  D := TSideData.Create;
+  D.Last := True;
+  PostObj(FWnd, WM_FT_SIDE, D);
 end;
 
 { TLiveThread }
@@ -539,7 +604,7 @@ begin
     K := GetKlines(BtcSymbol, FChartTF, KlineLimit);
     D.KChart := K;
     D.AChart := Analyze(BtcSymbol, FChartTF, K);
-    D.DepthOk := GetDepthUSD(BtcSymbol, D.BidUSD, D.AskUSD);
+    D.DepthOk := GetDepthUSD(BtcSymbol, D.BidUSD, D.AskUSD, D.AskWallPrice, D.AskWallUSD, D.BidWallPrice, D.BidWallUSD);
   except
     on E: Exception do
       D.Err := E.Message;

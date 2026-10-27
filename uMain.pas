@@ -7,7 +7,7 @@ interface
 uses
   Windows, Messages, SysUtils, Classes, Graphics, Controls, Forms, StdCtrls,
   ExtCtrls, ComCtrls, CommCtrl, ImgList, Math, uAnalysis, uBinance, uWorkers,
-  uChart, uBtc;
+  uChart, uBtc, uDemo, uExness;
 
 const
   WM_FT_HIDESUGGEST = WM_USER + 301;
@@ -28,22 +28,35 @@ type
     RangeHigh, RangeLow, MA9, MA25, VolRatio: Double;
     Alert24, AlertRise: Boolean;
     AlertBO: string;
-    BoChance: Integer;   // peluang breakout dari analisa 5 menit (0-100)
+    BoChance: Integer;   // peluang breakout dari analisa 1 menit (0-100)
     BoNote: string;
     BoAlert: Boolean;
-    BoTime: TDateTime;   // jam analisa 5 menit keluar
+    BoTime: TDateTime;   // jam analisa 1 menit keluar
+    BoEta: TDateTime;    // perkiraan jam mencapai resisten (0 = belum terlihat)
+    SideCount: Integer;  // jumlah time frame yang sideways
+    SideNet: Integer;    // prediksi naik dikurangi turun (>0 naik, <0 turun)
+    SideText: string;
   end;
 
   TMainForm = class(TForm)
   private
+    btnDemo, btnExness, btnPersen, btnBO: TPanel;
     pnlTop, pnlMarket, pnlRight, pnlBottom, pnlStatus, pnlCoinHead, pnlChart: TPanel;
-    btnBtc, btnOpen: TPanel;
+    btnBtc, btnOpen, btnSide, btnSS: TPanel;
     pnlFrame, pnlFrameBar, pnlGrip, btnFrameClose, btnFrameMax: TPanel;
     FFrameDrag, FFrameSize, FFrameMax, FFrameInit: Boolean;
     FFramePt: TPoint;
     FrmCoin: TForm;
+    pnlBo, pnlPick, btnXau, btnClr: TPanel;
+    cbCoin: TComboBox;
+    lblCoinBook, lblBookSep, lblBookSell: TLabel;
+    lblBo: TLabel;
+    FDepthSym: string;       // order book terakhir yang diterima (untuk koin ini)
+    FDepthBid, FDepthAsk, FDepthWallPrice, FDepthWallUSD, FDepthBidWallPrice, FDepthBidWallUSD: Double;
     FPreBoBusy: Boolean;
     FPreBoStart: Cardinal;
+    FSideBusy: Boolean;
+    FSideStart: Cardinal;
     FFrameEdge: Integer;   // bit: 1 kiri, 2 kanan, 4 bawah, 8 atas
     FFrameNormal: TRect;
     lblSource, lblCoin, lblCoinPrice, lblCoinChg: TLabel;
@@ -70,6 +83,7 @@ type
     FView: array of Integer;
     FSortCol: Integer;
     FSortDesc: Boolean;
+    FBoMode: Boolean;     // urutan khusus tombol BO: sinyal beli / breakout dulu
     FScanner: TScannerThread;
     FSelected: string;
     FReqId: Integer;
@@ -102,6 +116,17 @@ type
     procedure WMLive(var M: TMessage); message WM_FT_LIVE;
     procedure WMPreBo(var M: TMessage); message WM_FT_PREBO;
     procedure StartPreBo;
+    procedure WMSide(var M: TMessage); message WM_FT_SIDE;
+    procedure StartSide;
+    procedure UpdateBoBanner;
+    procedure ChooseCoin(const Sym: string);
+    procedure XauClick(Sender: TObject);
+    procedure cbCoinDropDown(Sender: TObject);
+    procedure ClrClick(Sender: TObject);
+    function CoinLabel(const Sym: string): string;
+    function LabelSym(const S: string): string;
+    procedure cbCoinSelect(Sender: TObject);
+    procedure cbCoinKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure UpdateMarketStrip;
     procedure UpdateCoinHeader;
     procedure UpdateSuggest;
@@ -124,7 +149,7 @@ type
     function EdgeAt(X, Y: Integer): Integer;
     procedure EdgeMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
     procedure EdgeMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
-    procedure SelectSymbol(const Sym: string);
+    procedure SelectSymbol(const Sym: string; KeepSearch: Boolean = False);
     procedure RequestDetail;
     procedure ShowDetail(D: TDetailData);
     procedure ApplyAnalysis(Idx: Integer; const A: TAnalysis);
@@ -150,6 +175,14 @@ type
     procedure TFClick(Sender: TObject);
     procedure UpdateTFButtons;
     procedure btnBtcClick(Sender: TObject);
+    procedure btnDemoClick(Sender: TObject);
+    procedure btnExnessClick(Sender: TObject);
+    procedure btnPersenClick(Sender: TObject);
+    procedure btnBOClick(Sender: TObject);
+    procedure btnSideClick(Sender: TObject);
+    procedure btnSSClick(Sender: TObject);
+    procedure SSClose(Sender: TObject; var Action: TCloseAction);
+    function DemoQuote(const Sym: string; var Q: TDemoQuote): Boolean;
     procedure btnOpenClick(Sender: TObject);
     procedure lbAlertsDblClick(Sender: TObject);
     procedure lbAlertsDrawItem(Control: TWinControl; Index: Integer; Rect: TRect; State: TOwnerDrawState);
@@ -180,15 +213,19 @@ var
 implementation
 
 const
-  ColNames: array[0..16] of string = ('No', 'Koin', 'Harga', '24j %',
-    'Volume 24j', 'Beli %', 'Jual %', 'Beli $ (24j)', 'Jual $ (24j)', 'Trend MA',
-    'Cross MA terakhir', 'Support', 'Resisten', 'Support terkuat (x mantul)', 'Status', 'Sinyal', 'Peluang BO 5m (jam)');
-  ColWidths: array[0..16] of Integer = (42, 105, 95, 72, 88, 58, 58, 88, 88, 100,
-    150, 88, 88, 165, 120, 135, 140);
+  SideTopCoins = 30;   // koin volume terbesar yang dicek sideways tiap putaran
 
-  FilterNames: array[0..10] of string = ('Semua koin', 'Naik >= warning %', 'Turun',
+  ColNames: array[0..17] of string = ('No', 'Koin', 'Harga', '24j %',
+    'Volume 24j', 'Beli %', 'Jual %', 'Beli $ (24j)', 'Jual $ (24j)', 'Trend MA',
+    'Cross MA terakhir', 'Support', 'Resisten', 'Support terkuat (x mantul)', 'Status', 'Sinyal', 'Peluang BO 1m (jam, perkiraan breakout)',
+    'Sideways + prediksi (1m 5m 10m 15m 30m 1j)');
+  ColWidths: array[0..17] of Integer = (42, 105, 95, 72, 88, 58, 58, 88, 88, 100,
+    150, 88, 88, 165, 120, 135, 330, 420);
+
+  FilterNames: array[0..13] of string = ('Semua koin', 'Naik >= warning %', 'Turun',
     'Mau breakout / breakout', 'Golden cross baru', 'Death cross baru',
-    'Trend bullish', 'Trend bearish', 'Sinyal BELI', 'Sinyal JUAL', 'Peluang breakout tinggi (>=75)');
+    'Trend bullish', 'Trend bearish', 'Sinyal BELI', 'Sinyal JUAL', 'Peluang breakout tinggi (>=75)',
+    'Sideways (semua prediksi)', 'Sideways prediksi NAIK', 'Sideways prediksi TURUN');
 
 function Bar(Pct: Double; W: Integer): string;
 var
@@ -377,7 +414,37 @@ begin
   btnBtc.Hint := 'Analisa khusus Bitcoin: naik/turun, support, resisten, kapan beli/jual';
   btnBtc.ShowHint := True;
 
-  btnOpen := MakeBtn(pnlTop, 926, 10, 250, 46, 'Buka di Binance.bh Futures',
+  btnSide := MakeBtn(pnlTop, 926, 10, 96, 46, 'Side Way', clrPanel2, clrGold, btnSideClick);
+  btnSide.Font.Size := 12;
+  btnSide.Hint := 'Tampilkan hanya koin sideways + prediksi naik/turun (klik lagi untuk semua koin)';
+  btnSide.ShowHint := True;
+
+  btnDemo := MakeBtn(pnlTop, 1032, 10, 96, 46, 'Demo', clrUp, clrBg, btnDemoClick);
+  btnDemo.Font.Size := 16;
+  btnDemo.Hint := 'Demo trading Futures (uang virtual): long/short, leverage, time frame, pilih koin';
+  btnDemo.ShowHint := True;
+
+  btnExness := MakeBtn(pnlTop, 1138, 10, 110, 46, 'Exness', $0000E6FF, clrBg, btnExnessClick);
+  btnExness.Font.Size := 16;
+  btnExness.Hint := 'Terminal trading bergaya Exness (akun demo): lot, Buy/Sell, pending, TP/SL, margin';
+  btnExness.ShowHint := True;
+
+  btnPersen := MakeBtn(pnlTop, 1254, 10, 96, 46, 'Persen', clrPanel2, clrUp, btnPersenClick);
+  btnPersen.Font.Size := 14;
+  btnPersen.Hint := 'Urutkan tabel berdasarkan persen naik 24 jam (tertinggi di atas)';
+  btnPersen.ShowHint := True;
+
+  btnBO := MakeBtn(pnlTop, 1356, 10, 76, 46, 'BO', clrPanel2, clrGold, btnBOClick);
+  btnBO.Font.Size := 16;
+  btnBO.Hint := 'Urutkan tabel berdasarkan koin yang mau breakout (peluang BO tertinggi di atas)';
+  btnBO.ShowHint := True;
+
+  btnSS := MakeBtn(pnlTop, 1438, 10, 110, 46, 'Analisa SS', clrPanel2, clrGold, btnSSClick);
+  btnSS.Font.Size := 12;
+  btnSS.Hint := 'Analisa koin terpilih: breakout/breakdown, MA 25/99/200, resisten, support, dan harga yang paling banyak dibeli';
+  btnSS.ShowHint := True;
+
+  btnOpen := MakeBtn(pnlTop, 1558, 10, 250, 46, 'Buka di Binance.bh Futures',
     clrPanel2, clrGold, btnOpenClick);
 
   { --- Strip pasar: jumlah naik/turun & top gainer/loser --- }
@@ -509,12 +576,42 @@ begin
   lblCoinChg := MakeLabel(pnlCoinHead, 380, 13, '');
   lblCoinChg.Font.Size := 12;
   lblCoinChg.Font.Style := [fsBold];
+  lblCoinBook := MakeLabel(pnlCoinHead, 560, 15, '');
+  lblCoinBook.Font.Size := 10;
+  lblCoinBook.Font.Style := [fsBold];
+  lblCoinBook.Font.Color := clrUp;
+  lblBookSep := MakeLabel(pnlCoinHead, 560, 15, ' | ');
+  lblBookSep.Font.Size := 10;
+  lblBookSep.Font.Style := [fsBold];
+  lblBookSell := MakeLabel(pnlCoinHead, 560, 15, '');
+  lblBookSell.Font.Size := 10;
+  lblBookSell.Font.Style := [fsBold];
+  lblBookSell.Font.Color := clrDown;
+
+  { peluang breakout (analisa 1 menit) di bagian atas kerangka }
+  pnlBo := TPanel.Create(Self);
+  pnlBo.Parent := pnlRight;
+  pnlBo.Align := alTop;
+  pnlBo.Top := pnlCoinHead.Height;
+  pnlBo.Height := 46;
+  pnlBo.BevelOuter := bvNone;
+  pnlBo.Color := clrBg;
+  lblBo := TLabel.Create(Self);
+  lblBo.Parent := pnlBo;
+  lblBo.Align := alClient;
+  lblBo.AutoSize := False;
+  lblBo.WordWrap := True;
+  lblBo.Layout := tlCenter;
+  lblBo.Font.Size := 10;
+  lblBo.Font.Style := [fsBold];
+  lblBo.Font.Color := clrDim;
+  lblBo.Caption := '  Peluang breakout (analisa 1 menit): -';
 
   { tombol time frame grafik }
   pnlTF := TPanel.Create(Self);
   pnlTF.Parent := pnlRight;
   pnlTF.Align := alTop;
-  pnlTF.Top := pnlCoinHead.Height;
+  pnlTF.Top := pnlCoinHead.Height + pnlBo.Height;
   pnlTF.Height := 34;
   pnlTF.BevelOuter := bvNone;
   pnlTF.Color := clrPanel;
@@ -528,6 +625,34 @@ begin
   lblLive := MakeLabel(pnlTF, 8 + ChartTFCount * 58 + 6, 9, '');
   lblLive.Font.Style := [fsBold];
   lblLive.Font.Color := clrUp;
+
+  { pilihan koin Binance langsung dari halaman grafik & analisa }
+  pnlPick := TPanel.Create(Self);
+  pnlPick.Parent := pnlTF;
+  pnlPick.Align := alRight;
+  pnlPick.Width := 296;
+  pnlPick.BevelOuter := bvNone;
+  pnlPick.Color := clrPanel;
+  cbCoin := TComboBox.Create(Self);
+  cbCoin.Parent := pnlPick;
+  cbCoin.SetBounds(4, 5, 170, 24);
+  btnClr := MakeBtn(pnlPick, 178, 5, 26, 24, 'X', clrPanel2, clrDown, ClrClick);
+  btnClr.Font.Size := 10;
+  btnClr.Hint := 'Kosongkan pencarian koin';
+  btnClr.ShowHint := True;
+  btnXau := MakeBtn(pnlPick, 208, 5, 80, 24, 'XAUUSDT', clrGold, clrBg, XauClick);
+  btnXau.Font.Size := 9;
+  btnXau.Hint := 'Buka grafik & analisa emas (XAUUSDT)';
+  btnXau.ShowHint := True;
+  cbCoin.Style := csDropDown;
+  cbCoin.Color := clrBg;
+  cbCoin.Font.Color := clrText;
+  cbCoin.Font.Style := [fsBold];
+  cbCoin.DropDownCount := 18;
+  cbCoin.Text := 'Pilih koin Binance';
+  cbCoin.OnDropDown := cbCoinDropDown;
+  cbCoin.OnSelect := cbCoinSelect;
+  cbCoin.OnKeyDown := cbCoinKeyDown;
 
   pnlChart := TPanel.Create(Self);
   pnlChart.Parent := pnlRight;
@@ -697,15 +822,42 @@ begin
     8: Result := R.Signal = 'BELI';
     9: Result := R.Signal = 'JUAL';
     10: Result := R.BoChance >= 75;
+    11: Result := R.SideCount > 0;
+    12: Result := (R.SideCount > 0) and (R.SideNet > 0);
+    13: Result := (R.SideCount > 0) and (R.SideNet < 0);
   else
     Result := True;
   end;
+end;
+
+{ 3 = sinyal BELI + breakout, 2 = sinyal BELI, 1 = breakout / mau breakout, 0 = lainnya }
+function BoRank(const R: TCoinRow): Integer;
+var
+  Bo: Boolean;
+begin
+  Bo := (R.Breakout = 'MAU BREAKOUT') or (R.Breakout = 'BREAKOUT NAIK');
+  if (R.Signal = 'BELI') and Bo then Result := 3
+  else if R.Signal = 'BELI' then Result := 2
+  else if Bo then Result := 1
+  else Result := 0;
 end;
 
 function TMainForm.CompareRows(A, B: Integer): Integer;
 var
   CA, CB: Integer;
 begin
+  if FBoMode then
+  begin
+    Result := BoRank(FCoins[A]) - BoRank(FCoins[B]);
+    if Result = 0 then
+      Result := FCoins[A].BoChance - FCoins[B].BoChance;
+    if Result = 0 then
+      Result := CmpF(FCoins[A].Chg24, FCoins[B].Chg24);
+    if Result = 0 then
+      Result := CompareStr(FCoins[B].Symbol, FCoins[A].Symbol);
+    Result := -Result;
+    Exit;
+  end;
   case FSortCol of
     1: Result := CompareStr(FCoins[A].Symbol, FCoins[B].Symbol);
     2: Result := CmpF(FCoins[A].Price, FCoins[B].Price);
@@ -727,6 +879,12 @@ begin
     14: Result := CompareStr(FCoins[A].Breakout, FCoins[B].Breakout);
     15: Result := FCoins[A].Score - FCoins[B].Score;
     16: Result := FCoins[A].BoChance - FCoins[B].BoChance;
+    17:
+      begin
+        Result := FCoins[A].SideCount - FCoins[B].SideCount;
+        if Result = 0 then
+          Result := FCoins[A].SideNet - FCoins[B].SideNet;
+      end;
   else
     Result := CmpF(FCoins[A].QuoteVol, FCoins[B].QuoteVol);
   end;
@@ -837,12 +995,15 @@ begin
       AlertBO := B;
     end;
   StartPreBo;
+  StartSide;
   FLastBreakoutCheck := Now;
   FDirty := True;
 end;
 
+function EtaText(Eta, Base: TDateTime): string; forward;
+
 { Koin yang harganya sudah dekat/di atas resisten 1 jam dianalisa lagi dengan
-  candle 5 menit untuk menilai peluang breakout (dilihat dari persilangan MA
+  candle 1 menit untuk menilai peluang breakout (dilihat dari persilangan MA
   di bawah harga). Maksimal 12 koin terdekat per putaran. }
 procedure TMainForm.StartPreBo;
 var
@@ -921,14 +1082,113 @@ begin
       BoChance := D.Chance;
       BoNote := D.Note;
       BoTime := Now;
+      if D.EtaMin >= 0 then
+        BoEta := Now + D.EtaMin / 1440
+      else
+        BoEta := 0;
       if (BoChance >= 75) and not BoAlert then
       begin
         BoAlert := True;
-        AddAlert(Symbol, Format('[PELUANG BREAKOUT %d%%] %s harga %s, resisten %s - %s (analisa 5m jam %s)',
-          [BoChance, Symbol, FmtPrice(Price), FmtPrice(RangeHigh), BoNote, FormatDateTime('hh:nn:ss', BoTime)]));
+        AddAlert(Symbol, Format('[PELUANG BREAKOUT %d%%] %s harga %s, resisten %s - %s (analisa 1m jam %s) - %s',
+          [BoChance, Symbol, FmtPrice(Price), FmtPrice(RangeHigh), BoNote, FormatDateTime('hh:nn:ss', BoTime), EtaText(BoEta, BoTime)]));
       end
       else if BoChance < 60 then
         BoAlert := False;
+    end;
+    FDirty := True;
+    if D.Sym = FSelected then
+      UpdateBoBanner;
+  finally
+    D.Free;
+  end;
+end;
+
+{ Cek sideways + prediksi arah di 6 time frame untuk SideTopCoins koin dengan
+  volume 24 jam terbesar (satu putaran selesai dulu sebelum mulai lagi). }
+procedure TMainForm.StartSide;
+var
+  I, J, K, N, P: Integer;
+  Cand: array of Integer;
+  Syms: array of string;
+begin
+  if FSideBusy and (GetTickCount - FSideStart < 240000) then
+    Exit;
+  N := Min(SideTopCoins, Length(FCoins));
+  if N = 0 then
+    Exit;
+  SetLength(Cand, N);
+  K := 0;
+  for I := 0 to High(FCoins) do
+  begin
+    J := K;   // posisi sisip pada daftar yang terurut volume turun
+    while (J > 0) and (FCoins[Cand[J - 1]].QuoteVol < FCoins[I].QuoteVol) do
+      Dec(J);
+    if J >= N then
+      Continue;
+    if K < N then
+      Inc(K);
+    for P := K - 1 downto J + 1 do
+      Cand[P] := Cand[P - 1];
+    Cand[J] := I;
+  end;
+  SetLength(Syms, K);
+  for I := 0 to K - 1 do
+    Syms[I] := FCoins[Cand[I]].Symbol;
+  FSideBusy := True;
+  FSideStart := GetTickCount;
+  TSideThread.Create(Handle, Syms);
+end;
+
+procedure TMainForm.WMSide(var M: TMessage);
+var
+  D: TSideData;
+  Idx, T, Up, Dn: Integer;
+  S: string;
+begin
+  D := TSideData(M.LParam);
+  try
+    if D.Last then
+    begin
+      FSideBusy := False;
+      Exit;
+    end;
+    if not D.Ok then
+      Exit;
+    Idx := FindCoin(D.Sym);
+    if Idx < 0 then
+      Exit;
+    Up := 0;
+    Dn := 0;
+    S := '';
+    for T := 0 to SideTFCount - 1 do
+      if D.Dir[T] <> 0 then
+      begin
+        if S <> '' then
+          S := S + ', ';
+        if D.Dir[T] > 0 then
+        begin
+          Inc(Up);
+          S := S + SideTFLabel[T] + ' NAIK';
+        end
+        else
+        begin
+          Inc(Dn);
+          S := S + SideTFLabel[T] + ' TURUN';
+        end;
+      end;
+    with FCoins[Idx] do
+    begin
+      SideCount := Up + Dn;
+      SideNet := Up - Dn;
+      if SideCount = 0 then
+        SideText := ''
+      else
+      begin
+        if Up > Dn then SideText := 'NAIK'
+        else if Dn > Up then SideText := 'TURUN'
+        else SideText := 'IMBANG';
+        SideText := Format('%s (%d/%d)  %s', [SideText, Up, Dn, S]);
+      end;
     end;
     FDirty := True;
   finally
@@ -1023,13 +1283,135 @@ begin
   lblLosers.Left := lblGainers.Left + lblGainers.Width + 30;
 end;
 
-procedure TMainForm.UpdateCoinHeader;
+function TMainForm.CoinLabel(const Sym: string): string;
 var
   Idx: Integer;
+begin
+  Idx := FindCoin(Sym);
+  if Idx >= 0 then
+    Result := Sym + '   ' + FmtPct(FCoins[Idx].Chg24)
+  else
+    Result := Sym;
+end;
+
+{ ambil nama koin dari teks "BTCUSDT   +2.35%" }
+function TMainForm.LabelSym(const S: string): string;
+var
+  P: Integer;
+begin
+  Result := UpperCase(Trim(S));
+  P := Pos(' ', Result);
+  if P > 0 then
+    Result := Copy(Result, 1, P - 1);
+end;
+
+procedure TMainForm.cbCoinDropDown(Sender: TObject);
+var
+  I: Integer;
+  Txt: string;
+begin
+  Txt := cbCoin.Text;
+  cbCoin.Items.BeginUpdate;
+  try
+    cbCoin.Items.Clear;
+    for I := 0 to FIndex.Count - 1 do
+      cbCoin.Items.Add(CoinLabel(FIndex[I]));
+  finally
+    cbCoin.Items.EndUpdate;
+  end;
+  cbCoin.Text := Txt;
+end;
+
+procedure TMainForm.ClrClick(Sender: TObject);
+begin
+  cbCoin.Text := '';
+  cbCoin.SetFocus;
+end;
+
+procedure TMainForm.XauClick(Sender: TObject);
+begin
+  ChooseCoin('XAUUSDT');
+end;
+
+procedure TMainForm.cbCoinSelect(Sender: TObject);
+begin
+  ChooseCoin(LabelSym(cbCoin.Text));
+end;
+
+procedure TMainForm.cbCoinKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+var
+  Sym: string;
+begin
+  if Key = VK_RETURN then
+  begin
+    Key := 0;
+    Sym := LabelSym(cbCoin.Text);
+    if (FindCoin(Sym) < 0) and (FindCoin(Sym + 'USDT') >= 0) then
+      Sym := Sym + 'USDT';
+    ChooseCoin(Sym);
+  end;
+end;
+
+{ Ganti koin yang ditampilkan di kerangka tanpa mengubah pencarian di tabel }
+procedure TMainForm.ChooseCoin(const Sym: string);
+var
+  I: Integer;
+begin
+  if FindCoin(Sym) < 0 then
+  begin
+    UpdateStatus('Koin ' + Sym + ' tidak ditemukan di Binance');
+    Exit;
+  end;
+  SetSelected(Sym);
+  tmrSelect.Enabled := False;
+  RequestDetail;
+  for I := 0 to High(FView) do
+    if FCoins[FView[I]].Symbol = Sym then
+    begin
+      lv.Items[I].Selected := True;
+      lv.Items[I].MakeVisible(False);
+      Break;
+    end;
+end;
+
+procedure TMainForm.UpdateBoBanner;
+var
+  Idx: Integer;
+  Lvl: string;
 begin
   Idx := FindCoin(FSelected);
   if Idx < 0 then
     Exit;
+  with FCoins[Idx] do
+    if BoChance > 0 then
+    begin
+      if BoChance >= 75 then Lvl := ' SANGAT TINGGI'
+      else if BoChance >= 55 then Lvl := ' TINGGI'
+      else Lvl := '';
+      lblBo.Caption := Format('  Peluang breakout (analisa 1 menit, jam %s): %d%%%s  -  %s' + #13#10 + '  %s',
+        [FormatDateTime('hh:nn:ss', BoTime), BoChance,
+         Lvl,
+         EtaText(BoEta, BoTime), BoNote]);
+      if BoChance >= 75 then lblBo.Font.Color := clrUp
+      else if BoChance >= 55 then lblBo.Font.Color := clrGold
+      else lblBo.Font.Color := clrDim;
+    end
+    else
+    begin
+      lblBo.Caption := '  Peluang breakout (analisa 1 menit): belum ada - harga belum dekat resisten 1 jam';
+      lblBo.Font.Color := clrDim;
+    end;
+end;
+
+procedure TMainForm.UpdateCoinHeader;
+var
+  Idx: Integer;
+  Tot: Double;
+begin
+  Idx := FindCoin(FSelected);
+  if Idx < 0 then
+    Exit;
+  UpdateBoBanner;
   lblCoin.Caption := FSelected;
   lblCoinPrice.Left := lblCoin.Left + lblCoin.Width + 20;
   lblCoinPrice.Caption := FmtPrice(FCoins[Idx].Price);
@@ -1044,6 +1426,31 @@ begin
     lblCoinChg.Caption := 'TURUN ' + FmtPct(FCoins[Idx].Chg24) + ' (24j)';
     lblCoinChg.Font.Color := clrDown;
   end;
+  { order book di sebelah naik/turun 24 jam }
+  lblCoinBook.Left := lblCoinChg.Left + lblCoinChg.Width + 24;
+  Tot := FDepthBid + FDepthAsk;
+  if (FDepthSym = FSelected) and (Tot > 0) then
+  begin
+    lblCoinBook.Caption := Format('Order book: antrian beli %s (%.1f%%)',
+      [FmtUSD(FDepthBid), FDepthBid / Tot * 100]);
+    if FDepthBidWallPrice > 0 then
+      lblCoinBook.Caption := lblCoinBook.Caption + Format('  terbanyak di %s (%s)',
+        [FmtPrice(FDepthBidWallPrice), FmtUSD(FDepthBidWallUSD)]);
+    lblBookSell.Caption := Format('antrian jual %s (%.1f%%)',
+      [FmtUSD(FDepthAsk), FDepthAsk / Tot * 100]);   { antrian jual merah }
+    if FDepthWallPrice > 0 then
+      lblBookSell.Caption := lblBookSell.Caption + Format('  terbanyak di %s (%s)',
+        [FmtPrice(FDepthWallPrice), FmtUSD(FDepthWallUSD)]);
+    lblBookSep.Visible := True;
+  end
+  else
+  begin
+    lblCoinBook.Caption := 'Order book: memuat ...';
+    lblBookSell.Caption := '';
+    lblBookSep.Visible := False;
+  end;
+  lblBookSep.Left := lblCoinBook.Left + lblCoinBook.Width;
+  lblBookSell.Left := lblBookSep.Left + lblBookSep.Width;
 end;
 
 procedure TMainForm.UpdateStatus(const Extra: string);
@@ -1140,7 +1547,7 @@ begin
   if (I < 0) or (I >= lbSuggest.Items.Count) then
     Exit;
   lbSuggest.Visible := False;
-  SelectSymbol(lbSuggest.Items[I]);
+  SelectSymbol(lbSuggest.Items[I], True);
   lv.SetFocus;
   lbSuggest.Visible := False;   // teks cari sudah dikosongkan, jangan munculkan pilihan lagi
 end;
@@ -1476,9 +1883,29 @@ begin
     while Item.SubItems.Count < 15 do
       Item.SubItems.Add('');
     if BoChance > 0 then
-      Item.SubItems.Add(Format('%d%%  %s', [BoChance, FormatDateTime('hh:nn:ss', BoTime)]))
+      Item.SubItems.Add(Format('%d%%  %s  %s', [BoChance, FormatDateTime('hh:nn', BoTime), EtaText(BoEta, BoTime)]))
     else
       Item.SubItems.Add('-');
+    if SideText <> '' then
+      Item.SubItems.Add(SideText)
+    else
+      Item.SubItems.Add('-');
+  end;
+end;
+
+function EtaText(Eta, Base: TDateTime): string;
+var
+  M: Integer;
+begin
+  if Eta <= 0 then
+    Result := 'waktu belum terlihat'
+  else
+  begin
+    M := Round((Eta - Base) * 1440);
+    if M <= 0 then
+      Result := 'sudah breakout'
+    else
+      Result := Format('perkiraan breakout jam %s (+%d mnt)', [FormatDateTime('hh:nn', Eta), M]);
   end;
 end;
 
@@ -1530,6 +1957,10 @@ begin
       16: if BoChance >= 75 then C := clrUp
           else if BoChance >= 55 then C := clrGold
           else C := clrDim;
+      17: if SideCount = 0 then C := clrDim
+          else if SideNet > 0 then C := clrUp
+          else if SideNet < 0 then C := clrDown
+          else C := clrGold;
       14: if Pos('BREAKOUT', Breakout) > 0 then C := clrGold
           else if Breakout <> '' then C := clrDown;
       15: if Signal = 'BELI' then C := clrUp
@@ -1537,7 +1968,7 @@ begin
           else C := clrDim;
     end;
   Sender.Canvas.Font.Color := C;
-  if SubItem in [1, 3, 13..15] then
+  if SubItem in [1, 3, 13..15, 17] then
     Sender.Canvas.Font.Style := [fsBold]
   else
     Sender.Canvas.Font.Style := [];
@@ -1740,6 +2171,8 @@ begin
   if Sym = FSelected then
     Exit;
   FSelected := Sym;
+  if LabelSym(cbCoin.Text) <> Sym then
+    cbCoin.Text := CoinLabel(Sym);
   FrmCoin.Caption := Sym + ' - Grafik & Analisa';
   ShowFrame;
   ResetView(FCV);
@@ -1775,6 +2208,7 @@ end;
 
 procedure TMainForm.lvColumnClick(Sender: TObject; Column: TListColumn);
 begin
+  FBoMode := False;
   if Column.Index = FSortCol then
     FSortDesc := not FSortDesc
   else
@@ -1830,6 +2264,233 @@ begin
   ShowBtcForm;
 end;
 
+procedure TMainForm.btnDemoClick(Sender: TObject);
+begin
+  if FSelected <> '' then
+    ShowDemoForm(FIndex, DemoQuote, FSelected)
+  else
+    ShowDemoForm(FIndex, DemoQuote, 'BTCUSDT');
+end;
+
+function TMainForm.DemoQuote(const Sym: string; var Q: TDemoQuote): Boolean;
+var
+  Idx: Integer;
+begin
+  Idx := FindCoin(Sym);
+  Result := Idx >= 0;
+  if Result then
+  begin
+    Q.Price := FCoins[Idx].Price;
+    Q.Chg := FCoins[Idx].Chg24;
+    Q.High := FCoins[Idx].High24;
+    Q.Low := FCoins[Idx].Low24;
+    Q.Vol := FCoins[Idx].QuoteVol;
+  end;
+end;
+
+procedure TMainForm.btnExnessClick(Sender: TObject);
+begin
+  if FSelected <> '' then
+    ShowExnessForm(FIndex, DemoQuote, FSelected)
+  else
+    ShowExnessForm(FIndex, DemoQuote, 'XAUUSDT');
+end;
+
+procedure TMainForm.btnPersenClick(Sender: TObject);
+begin
+  FBoMode := False;
+  FSortCol := 3;
+  FSortDesc := True;
+  RebuildView;
+end;
+
+procedure TMainForm.btnBOClick(Sender: TObject);
+begin
+  FBoMode := True;
+  FSortCol := 16;
+  FSortDesc := True;
+  RebuildView;
+end;
+
+procedure TMainForm.btnSideClick(Sender: TObject);
+begin
+  if cbFilter.ItemIndex = 11 then
+    cbFilter.ItemIndex := 0
+  else
+    cbFilter.ItemIndex := 11;
+  FilterChange(nil);
+end;
+
+procedure TMainForm.SSClose(Sender: TObject; var Action: TCloseAction);
+begin
+  Action := caFree;
+end;
+
+{ Analisa SS koin terpilih (time frame grafik): status breakout/breakdown,
+  posisi harga terhadap MA 25/99/200, resisten & support, serta level harga
+  tempat pembelian agresif (taker buy) paling banyak. }
+procedure TMainForm.btnSSClick(Sender: TObject);
+const
+  Bins = 24;
+var
+  F: TForm;
+  M: TMemo;
+  A: TAnalysis;
+  K: TKlines;
+  L: TStringList;
+  P, Lo, Hi, Step, Buy: Double;
+  BuyBin, SellBin: array[0..Bins - 1] of Double;
+  I, B, Best, N, Score: Integer;
+  Idx: Integer;
+
+  function Pos2(Level: Double): string;
+  begin
+    if Level <= 0 then Result := '-'
+    else Result := FmtPrice(Level) + ' ' + DistPct(Level, P);
+  end;
+
+  procedure MALine(const Nm: string; Idx2: Integer);
+  begin
+    if not A.MAValid[Idx2] then
+      L.Add(Format(' %-8s: data belum cukup', [Nm]))
+    else if P > A.MA[Idx2] then
+    begin
+      L.Add(Format(' %-8s: %s  -> harga DI ATAS (support) %s', [Nm, FmtPrice(A.MA[Idx2]), DistPct(A.MA[Idx2], P)]));
+      Inc(Score);
+    end
+    else
+    begin
+      L.Add(Format(' %-8s: %s  -> harga DI BAWAH (resisten) %s', [Nm, FmtPrice(A.MA[Idx2]), DistPct(A.MA[Idx2], P)]));
+      Dec(Score);
+    end;
+  end;
+
+begin
+  if (FSelected = '') or (Length(FChartK) < 30) or not FChartA.Ok then
+  begin
+    Application.MessageBox('Klik dulu satu koin di tabel sampai grafiknya tampil.', 'Analisa SS', MB_OK or MB_ICONINFORMATION);
+    Exit;
+  end;
+  A := FChartA;
+  K := FChartK;
+  P := A.Price;
+  Idx := FindCoin(FSelected);
+  if (Idx >= 0) and (FCoins[Idx].Price > 0) then
+    P := FCoins[Idx].Price;
+  Score := 0;
+
+  L := TStringList.Create;
+  try
+    L.Add(Format(' ANALISA SS  %s  (%s)   harga %s', [FSelected, ChartTFLabel(A.Interval), FmtPrice(P)]));
+    L.Add(' ------------------------------------------------------------');
+    L.Add(' 1. BREAKOUT / BREAKDOWN (range 50 candle)');
+    L.Add(Format('    Resisten range : %s   Support range : %s', [Pos2(A.RangeHigh), Pos2(A.RangeLow)]));
+    if A.Breakout = '' then
+      L.Add('    Status         : masih di dalam range (belum breakout/breakdown)')
+    else
+      L.Add('    Status         : ' + A.Breakout);
+    if A.Breakout = 'BREAKOUT NAIK' then Inc(Score, 2)
+    else if A.Breakout = 'MAU BREAKOUT' then Inc(Score)
+    else if A.Breakout = 'BREAKDOWN' then Dec(Score, 2)
+    else if A.Breakout = 'MAU BREAKDOWN' then Dec(Score);
+    L.Add('');
+    L.Add(' 2. MOVING AVERAGE');
+    MALine('MA25', 1);
+    MALine('MA99', 3);
+    MALine('MA200', 4);
+    L.Add('');
+    L.Add(' 3. RESISTEN & SUPPORT');
+    L.Add('    Resisten terdekat : ' + Pos2(A.SwingRes));
+    L.Add('    Support terdekat  : ' + Pos2(A.SwingSup));
+    if A.StrongSupHits > 0 then
+      L.Add(Format('    Support terkuat   : %s (menahan %dx)', [Pos2(A.StrongSup), A.StrongSupHits]));
+    if A.StrongResHits > 0 then
+      L.Add(Format('    Resisten terkuat  : %s (menolak %dx)', [Pos2(A.StrongRes), A.StrongResHits]));
+    L.Add('');
+
+    { profil pembelian: taker buy per rentang harga, 200 candle terakhir }
+    N := Min(200, Length(K));
+    Lo := MaxDouble;
+    Hi := 0;
+    for I := Length(K) - N to High(K) do
+    begin
+      Lo := Min(Lo, K[I].L);
+      Hi := Max(Hi, K[I].H);
+    end;
+    L.Add(Format(' 4. HARGA YANG PALING BANYAK DIBELI (%d candle terakhir)', [N]));
+    if Hi > Lo then
+    begin
+      Step := (Hi - Lo) / Bins;
+      FillChar(BuyBin, SizeOf(BuyBin), 0);
+      FillChar(SellBin, SizeOf(SellBin), 0);
+      for I := Length(K) - N to High(K) do
+      begin
+        B := Trunc(((K[I].H + K[I].L + K[I].C) / 3 - Lo) / Step);
+        if B >= Bins then B := Bins - 1;
+        if B < 0 then B := 0;
+        BuyBin[B] := BuyBin[B] + K[I].TBQV;
+        SellBin[B] := SellBin[B] + (K[I].QV - K[I].TBQV);
+      end;
+      Best := 0;
+      for B := 1 to Bins - 1 do
+        if BuyBin[B] > BuyBin[Best] then
+          Best := B;
+      L.Add(Format('    Zona beli terbanyak : %s - %s  (%s dibeli, %s dijual)',
+        [FmtPrice(Lo + Best * Step), FmtPrice(Lo + (Best + 1) * Step), FmtUSD(BuyBin[Best]), FmtUSD(SellBin[Best])]));
+      Buy := Lo + (Best + 0.5) * Step;
+      if P > Lo + (Best + 1) * Step then
+      begin
+        L.Add('    Harga di ATAS zona beli terbanyak -> zona itu jadi support');
+        Inc(Score);
+      end
+      else if P < Lo + Best * Step then
+      begin
+        L.Add('    Harga di BAWAH zona beli terbanyak -> zona itu jadi resisten (pembeli lama tertahan rugi)');
+        Dec(Score);
+      end
+      else
+        L.Add('    Harga sedang di dalam zona beli terbanyak -> area keputusan');
+      L.Add('    Jarak ke tengah zona : ' + DistPct(Buy, P));
+      L.Add('    Sebaran pembelian (atas = harga tinggi):');
+      for B := Bins - 1 downto 0 do
+        if BuyBin[Best] > 0 then
+          L.Add(Format('      %s %s %s', [Copy(FmtPrice(Lo + B * Step) + '            ', 1, 12),
+            Bar(BuyBin[B] / BuyBin[Best] * 100, 24), FmtUSD(BuyBin[B])]));
+    end
+    else
+      L.Add('    data harga belum cukup');
+    L.Add('');
+    L.Add(' ------------------------------------------------------------');
+    if Score >= 3 then
+      L.Add(Format(' KESIMPULAN: CONDONG NAIK (skor %d)', [Score]))
+    else if Score <= -3 then
+      L.Add(Format(' KESIMPULAN: CONDONG TURUN (skor %d)', [Score]))
+    else
+      L.Add(Format(' KESIMPULAN: NETRAL / TUNGGU (skor %d)', [Score]));
+    L.Add(' Catatan: berdasarkan indikator, bukan jaminan arah harga.');
+
+    F := TForm.CreateNew(Self);
+    F.Caption := 'Analisa SS - ' + FSelected;
+    F.SetBounds(Left + 120, Top + 90, 700, 640);
+    F.Color := clrBg;
+    F.OnClose := SSClose;
+    M := TMemo.Create(F);
+    M.Parent := F;
+    M.Align := alClient;
+    M.ReadOnly := True;
+    M.ScrollBars := ssVertical;
+    M.Color := clrBg;
+    M.Font.Name := 'Courier New';
+    M.Font.Size := 10;
+    M.Font.Color := clrText;
+    M.BorderStyle := bsNone;
+    M.Lines.Text := L.Text;
+    F.Show;
+  finally
+    L.Free;
+  end;
+end;
+
 procedure TMainForm.btnOpenClick(Sender: TObject);
 begin
   if FSelected <> '' then
@@ -1843,14 +2504,16 @@ begin
   RequestDetail;
 end;
 
-procedure TMainForm.SelectSymbol(const Sym: string);
+procedure TMainForm.SelectSymbol(const Sym: string; KeepSearch: Boolean);
 var
   I: Integer;
 begin
   SetSelected(Sym);
-  if edSearch.Text <> '' then
-    edSearch.Text := '';
   cbFilter.ItemIndex := 0;
+  if KeepSearch then
+    edSearch.Text := Sym   { hasil pencarian tampil di tabel; klik barisnya akan mengosongkan lagi }
+  else if edSearch.Text <> '' then
+    edSearch.Text := '';
   RebuildView;
   for I := 0 to High(FView) do
     if FCoins[FView[I]].Symbol = Sym then
@@ -1974,7 +2637,8 @@ begin
     Handled := True;
   end
   else
-    Handled := BtcChartWheel(P, Delta);
+    Handled := BtcChartWheel(P, Delta) or DemoChartWheel(P, Delta) or
+      ExnessChartWheel(P, Delta);
 end;
 
 procedure TMainForm.RequestDetail;
@@ -2030,6 +2694,17 @@ begin
 
   L := TStringList.Create;
   try
+    if D.DepthOk then
+    begin
+      FDepthSym := A.Symbol;
+      FDepthBid := D.BidUSD;
+      FDepthAsk := D.AskUSD;
+      FDepthWallPrice := D.AskWallPrice;
+      FDepthWallUSD := D.AskWallUSD;
+      FDepthBidWallPrice := D.BidWallPrice;
+      FDepthBidWallUSD := D.BidWallUSD;
+    end;
+    UpdateCoinHeader;
     L.Add(Format(' %s   |   timeframe %s   |   %s', [A.Symbol, A.Interval, FormatDateTime('hh:nn:ss', Now)]));
     L.Add('');
     L.Add(Format(' SINYAL   : %s   (skor %d)', [SignalText(A.Signal), A.Score]));
@@ -2057,15 +2732,6 @@ begin
     L.Add(Format(' Beli : %12s  (%5.1f%%)', [FmtUSD(A.BuyUSD), A.BuyPct]));
     L.Add(Format(' Jual : %12s  (%5.1f%%)', [FmtUSD(A.SellUSD), A.SellPct]));
     L.Add(' Beli ' + Bar(A.BuyPct, 30) + ' Jual');
-    if D.DepthOk then
-    begin
-      Tot := D.BidUSD + D.AskUSD;
-      if Tot > 0 then
-      begin
-        L.Add(Format(' Order book: antrian beli %s (%.1f%%) | antrian jual %s (%.1f%%)',
-          [FmtUSD(D.BidUSD), D.BidUSD / Tot * 100, FmtUSD(D.AskUSD), D.AskUSD / Tot * 100]));
-      end;
-    end;
     L.Add('');
 
     L.Add(' --- MOVING AVERAGE ---');

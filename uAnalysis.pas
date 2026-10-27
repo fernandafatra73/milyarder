@@ -14,6 +14,13 @@ const
   CrossLookback = 10;   // cross dihitung "baru" bila terjadi dalam 10 candle terakhir
   KlineLimit = 700;     // cukup untuk MA650
 
+  // time frame untuk deteksi sideways + prediksi arah, dan batas lebar range
+  // (% dari 30 candle terakhir) agar masih dianggap sideways
+  SideTFCount = 6;
+  SideTFApi: array[0..SideTFCount - 1] of string = ('1m', '5m', '10m', '15m', '30m', '1h');
+  SideTFLabel: array[0..SideTFCount - 1] of string = ('1m', '5m', '10m', '15m', '30m', '1j');
+  SideMaxRange: array[0..SideTFCount - 1] of Double = (0.5, 0.9, 1.2, 1.5, 2.0, 3.0);
+
 type
   TKline = record
     OpenTime: Double;
@@ -63,7 +70,8 @@ type
 
 procedure ClearAnalysis(var A: TAnalysis);
 function BreakoutStatus(Price, RangeHigh, RangeLow, MA9, MA25, VolRatio: Double): string;
-function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string): Integer;
+function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string; out EtaMin: Integer): Integer;
+function SidewaysForecast(const K: TKlines; MaxRangePct: Double; out Dir: Integer): Boolean;
 procedure MergeKlines(var K: TKlines; const U: TKlines);
 function PrependKlines(var K: TKlines; const Old: TKlines): Integer;
 function Analyze(const Sym, Interval: string; const K: TKlines): TAnalysis;
@@ -98,11 +106,12 @@ begin
     Result := 'MAU BREAKDOWN';
 end;
 
-{ Peluang breakout (0-100) dari candle 5 menit terakhir, dilihat dari bawah:
+{ Peluang breakout (0-100) dari candle 1 menit terakhir, dilihat dari bawah:
   persilangan MA9 memotong MA25 ke atas, higher low, volume & tekanan beli
   naik, serta dekat/di atas resisten (RangeHigh dari analisa 1 jam). }
-function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string): Integer;
+function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string; out EtaMin: Integer): Integer;
 var
+  slope: Double;
   n, last, j, Back: Integer;
   P, gNow, gPrev, minA, minB, vNow, vOld, qv, tb, d, rise: Double;
   Crossed: Boolean;
@@ -133,18 +142,19 @@ var
 begin
   Result := 0;
   Note := '';
+  EtaMin := -1;
   n := Length(K);
-  if n < 40 then
+  if n < 70 then
     Exit;
   last := n - 1;
   P := K[last].C;
   if P <= 0 then
     Exit;
 
-  { persilangan dari bawah ke atas dalam 3 candle (15 menit) terakhir }
+  { persilangan dari bawah ke atas dalam 15 candle (15 menit) terakhir }
   Crossed := False;
   Back := 0;
-  for j := last downto last - 2 do
+  for j := last downto last - 14 do
     if (Gap(j - 1) <= 0) and (Gap(j) > 0) then
     begin
       Crossed := True;
@@ -154,7 +164,7 @@ begin
   gNow := Gap(last);
   gPrev := Gap(last - 1);
   if Crossed then
-    Pt(30, Format('MA9 baru memotong MA25 dari bawah (%d candle 5m lalu)', [Back]))
+    Pt(30, Format('MA9 baru memotong MA25 dari bawah (%d menit lalu)', [Back]))
   else if (gNow < 0) and (gNow > gPrev) and (Abs(gNow) / P < 0.003) then
     Pt(22, 'MA9 hampir memotong MA25 dari bawah')
   else if (gNow > 0) and (gNow > gPrev) then
@@ -162,22 +172,25 @@ begin
   if (P > SMA5(9, last)) and (P > SMA5(25, last)) then
     Pt(8, 'harga di atas MA9 & MA25');
 
-  { higher low: dasar 3 candle terakhir lebih tinggi dari 3 sebelumnya }
+  { higher low: dasar 5 menit terakhir lebih tinggi dari 5 menit sebelumnya }
   minA := K[last].L;
-  minB := K[last - 3].L;
-  for j := last - 2 to last do
+  minB := K[last - 5].L;
+  for j := last - 4 to last do
     if K[j].L < minA then minA := K[j].L;
-  for j := last - 5 to last - 3 do
+  for j := last - 9 to last - 5 do
     if K[j].L < minB then minB := K[j].L;
   if minA > minB then
     Pt(12, 'higher low');
 
-  { volume 15 menit terakhir vs rata-rata 20 candle sebelumnya }
-  vNow := (K[last].QV + K[last - 1].QV + K[last - 2].QV) / 3;
+  { volume 15 menit terakhir vs rata-rata 45 menit sebelumnya }
+  vNow := 0;
+  for j := last - 14 to last do
+    vNow := vNow + K[j].QV;
+  vNow := vNow / 15;
   vOld := 0;
-  for j := last - 22 to last - 3 do
+  for j := last - 59 to last - 15 do
     vOld := vOld + K[j].QV;
-  vOld := vOld / 20;
+  vOld := vOld / 45;
   if vOld > 0 then
   begin
     if vNow >= vOld * 2 then Pt(20, Format('volume %.1fx rata-rata', [vNow / vOld]))
@@ -186,8 +199,13 @@ begin
   end;
 
   { dominasi pembeli agresif 15 menit terakhir }
-  qv := K[last].QV + K[last - 1].QV + K[last - 2].QV;
-  tb := K[last].TBQV + K[last - 1].TBQV + K[last - 2].TBQV;
+  qv := 0;
+  tb := 0;
+  for j := last - 14 to last do
+  begin
+    qv := qv + K[j].QV;
+    tb := tb + K[j].TBQV;
+  end;
   if (qv > 0) and (tb / qv >= 0.55) then
     Pt(10, Format('pembeli agresif %.0f%%', [tb / qv * 100]));
 
@@ -201,12 +219,110 @@ begin
     else if d <= 3 then Pt(5, Format('%.2f%% dari resisten', [d]));
   end;
 
-  rise := (P - K[last - 5].C) / K[last - 5].C * 100;
+  rise := (P - K[last - 30].C) / K[last - 30].C * 100;
   if rise > 0 then
     Pt(5, Format('naik %.2f%% dalam 30 menit', [rise]));
 
+  { perkiraan waktu mencapai resisten: laju naik 30 menit terakhir diteruskan lurus }
+  if RangeHigh > 0 then
+  begin
+    if P > RangeHigh then
+      EtaMin := 0
+    else
+    begin
+      slope := (P - K[last - 30].C) / 30;   // naik per menit
+      if slope > 0 then
+      begin
+        d := (RangeHigh - P) / slope;   // menit
+        if d <= 240 then
+          EtaMin := Ceil(d);
+      end;
+    end;
+  end;
+
   if Result > 100 then
     Result := 100;
+end;
+
+{ Sideways = 30 candle terakhir bergerak di range sempit (<= MaxRangePct) dan
+  bolak-balik (net gerak < 30% dari total gerak). Bila sideways, Dir = prediksi
+  arah keluar range: +1 naik, -1 turun (skor MA9/MA25, harga vs MA25, higher
+  low, lower high, dan dominasi taker beli/jual 10 candle terakhir). }
+function SidewaysForecast(const K: TKlines; MaxRangePct: Double; out Dir: Integer): Boolean;
+const
+  Win = 30;
+var
+  n, i, first, score: Integer;
+  hh, ll, path, net, P, ma9, ma25, loA, loB, hiA, hiB, buy, tot: Double;
+begin
+  Result := False;
+  Dir := 0;
+  n := Length(K);
+  if n < Win + 2 then
+    Exit;
+  first := n - Win;
+  hh := 0;
+  ll := MaxDouble;
+  path := 0;
+  for i := first to n - 1 do
+  begin
+    hh := Max(hh, K[i].H);
+    ll := Min(ll, K[i].L);
+    if i > first then
+      path := path + Abs(K[i].C - K[i - 1].C);
+  end;
+  if (ll <= 0) or (path <= 0) then
+    Exit;
+  net := Abs(K[n - 1].C - K[first].C);
+  if ((hh - ll) / ((hh + ll) / 2) * 100 > MaxRangePct) or (net / path >= 0.3) then
+    Exit;
+  Result := True;
+
+  P := K[n - 1].C;
+  ma9 := 0;
+  for i := n - 9 to n - 1 do
+    ma9 := ma9 + K[i].C;
+  ma9 := ma9 / 9;
+  ma25 := 0;
+  for i := n - 25 to n - 1 do
+    ma25 := ma25 + K[i].C;
+  ma25 := ma25 / 25;
+
+  score := 0;
+  if ma9 > ma25 then Inc(score) else Dec(score);
+  if P > ma25 then Inc(score) else Dec(score);
+
+  loA := MaxDouble; loB := MaxDouble; hiA := 0; hiB := 0;
+  for i := n - 10 to n - 1 do
+  begin
+    loA := Min(loA, K[i].L);
+    hiA := Max(hiA, K[i].H);
+  end;
+  for i := n - 20 to n - 11 do
+  begin
+    loB := Min(loB, K[i].L);
+    hiB := Max(hiB, K[i].H);
+  end;
+  if loA > loB then Inc(score);   // higher low: tekanan naik
+  if hiA < hiB then Dec(score);   // lower high: tekanan turun
+
+  buy := 0;
+  tot := 0;
+  for i := n - 10 to n - 1 do
+  begin
+    tot := tot + K[i].QV;
+    buy := buy + K[i].TBQV;
+  end;
+  if tot > 0 then
+  begin
+    if buy / tot >= 0.52 then Inc(score)
+    else if buy / tot <= 0.48 then Dec(score);
+  end;
+
+  if score > 0 then Dir := 1
+  else if score < 0 then Dir := -1
+  else if P >= K[n - 6].C then Dir := 1   // seri: ikuti arah 5 candle terakhir
+  else Dir := -1;
 end;
 
 { Gabungkan candle terbaru (U) ke grafik (K): candle dengan waktu buka sama

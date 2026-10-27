@@ -9,6 +9,8 @@ uses
   uWorkers in 'uWorkers.pas',
   uChart in 'uChart.pas',
   uBtc in 'uBtc.pas',
+  uDemo in 'uDemo.pas',
+  uExness in 'uExness.pas',
   uMain in 'uMain.pas';
 
 begin

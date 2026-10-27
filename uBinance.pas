@@ -29,7 +29,9 @@ function SourceName: string;
 function TickerUrl: string;
 function GetKlines(const Sym, Interval: string; Limit: Integer; EndTime: Double = 0): TKlines;
 procedure GetTradingSymbols(List: TStrings);
-function GetDepthUSD(const Sym: string; var BidUSD, AskUSD: Double): Boolean;
+function GetDepthUSD(const Sym: string; var BidUSD, AskUSD, AskWallPrice, AskWallUSD, BidWallPrice, BidWallUSD: Double): Boolean;
+function GetDepthLevels(const Sym: string; Limit: Integer;
+  out BidP, BidQ, AskP, AskQ: TDoubleArray): Boolean;
 procedure OpenBinance(const Sym: string);
 
 implementation
@@ -286,14 +288,19 @@ begin
   end;
 end;
 
-function GetDepthUSD(const Sym: string; var BidUSD, AskUSD: Double): Boolean;
+function GetDepthUSD(const Sym: string; var BidUSD, AskUSD, AskWallPrice, AskWallUSD, BidWallPrice, BidWallUSD: Double): Boolean;
 var
   Root, Arr: TJNode;
   I: Integer;
   Url: string;
+  Lvl: Double;
 begin
   BidUSD := 0;
   AskUSD := 0;
+  AskWallPrice := 0;
+  AskWallUSD := 0;
+  BidWallPrice := 0;
+  BidWallUSD := 0;
   Result := False;
   if UseSpot then
     Url := Format('%s/api/v3/depth?symbol=%s&limit=100', [SPOT, Sym])
@@ -305,12 +312,72 @@ begin
       Arr := Root.Get('bids');
       if Arr <> nil then
         for I := 0 to Arr.Count - 1 do
-          BidUSD := BidUSD + Arr.Item(I).Item(0).AsFloat * Arr.Item(I).Item(1).AsFloat;
+        begin
+          Lvl := Arr.Item(I).Item(0).AsFloat * Arr.Item(I).Item(1).AsFloat;
+          BidUSD := BidUSD + Lvl;
+          if Lvl > BidWallUSD then   // antrian beli terbesar pada satu harga
+          begin
+            BidWallUSD := Lvl;
+            BidWallPrice := Arr.Item(I).Item(0).AsFloat;
+          end;
+        end;
       Arr := Root.Get('asks');
       if Arr <> nil then
         for I := 0 to Arr.Count - 1 do
-          AskUSD := AskUSD + Arr.Item(I).Item(0).AsFloat * Arr.Item(I).Item(1).AsFloat;
+        begin
+          Lvl := Arr.Item(I).Item(0).AsFloat * Arr.Item(I).Item(1).AsFloat;
+          AskUSD := AskUSD + Lvl;
+          if Lvl > AskWallUSD then   // antrian jual terbesar pada satu harga
+          begin
+            AskWallUSD := Lvl;
+            AskWallPrice := Arr.Item(I).Item(0).AsFloat;
+          end;
+        end;
       Result := True;
+    finally
+      Root.Free;
+    end;
+  except
+    Result := False;
+  end;
+end;
+
+{ Daftar level order book (harga & jumlah koin), terbaik dulu. }
+function GetDepthLevels(const Sym: string; Limit: Integer;
+  out BidP, BidQ, AskP, AskQ: TDoubleArray): Boolean;
+var
+  Root: TJNode;
+  Url: string;
+
+  procedure Load(Arr: TJNode; var P, Q: TDoubleArray);
+  var
+    I: Integer;
+  begin
+    SetLength(P, 0);
+    SetLength(Q, 0);
+    if Arr = nil then
+      Exit;
+    SetLength(P, Arr.Count);
+    SetLength(Q, Arr.Count);
+    for I := 0 to Arr.Count - 1 do
+    begin
+      P[I] := Arr.Item(I).Item(0).AsFloat;
+      Q[I] := Arr.Item(I).Item(1).AsFloat;
+    end;
+  end;
+
+begin
+  Result := False;
+  if UseSpot then
+    Url := Format('%s/api/v3/depth?symbol=%s&limit=%d', [SPOT, Sym, Limit])
+  else
+    Url := Format('%s/fapi/v1/depth?symbol=%s&limit=%d', [FAPI, Sym, Limit]);
+  try
+    Root := FetchJson(Url);
+    try
+      Load(Root.Get('bids'), BidP, BidQ);
+      Load(Root.Get('asks'), AskP, AskQ);
+      Result := (Length(BidP) > 0) and (Length(AskP) > 0);
     finally
       Root.Free;
     end;
