@@ -7,7 +7,7 @@ interface
 uses
   Windows, Messages, SysUtils, Classes, Graphics, Controls, Forms, StdCtrls,
   ExtCtrls, ComCtrls, CommCtrl, ImgList, Math, Dialogs, uAnalysis, uBinance, uWorkers,
-  uChart, uBtc, uDemo, uExness, uCandle, uShot;
+  uChart, uBtc, uDemo, uExness, uCandle, uShot, uCek;
 
 const
   WM_FT_HIDESUGGEST = WM_USER + 301;
@@ -43,6 +43,8 @@ type
     btnDemo, btnExness, btnPersen, btnBO: TPanel;
     pnlTop, pnlMarket, pnlRight, pnlBottom, pnlStatus, pnlCoinHead, pnlChart: TPanel;
     btnBtc, btnOpen, btnSide, btnSS, btnCandle: TPanel;
+    pnlCap, btnCap, btnCek: TPanel;
+    tmrCap: TTimer;
     pnlFrame, pnlFrameBar, pnlGrip, btnFrameClose, btnFrameMax: TPanel;
     FFrameDrag, FFrameSize, FFrameMax, FFrameInit: Boolean;
     FFramePt: TPoint;
@@ -181,6 +183,10 @@ type
     procedure btnBOClick(Sender: TObject);
     procedure btnSideClick(Sender: TObject);
     procedure btnSSClick(Sender: TObject);
+    procedure btnCapClick(Sender: TObject);
+    procedure btnCekClick(Sender: TObject);
+    procedure tmrCapTimer(Sender: TObject);
+    function CekPrice(const Sym: string; var P: Double): Boolean;
     procedure ShowSSReport(const Title: string; const A: TAnalysis; const K: TKlines;
       P: Double; const Note: string; Relative: Boolean);
     procedure btnCandleClick(Sender: TObject);
@@ -654,6 +660,26 @@ begin
   btnXau.Font.Size := 9;
   btnXau.Hint := 'Buka grafik & analisa emas (XAUUSDT)';
   btnXau.ShowHint := True;
+  { capture grafik + analisa ke halaman Cek Grafik }
+  pnlCap := TPanel.Create(Self);
+  pnlCap.Parent := pnlTF;
+  pnlCap.Align := alRight;
+  pnlCap.Width := 224;
+  pnlCap.BevelOuter := bvNone;
+  pnlCap.Color := clrPanel;
+  btnCap := MakeBtn(pnlCap, 4, 5, 100, 24, 'Capture', clrGold, clrBg, btnCapClick);
+  btnCap.Font.Size := 9;
+  btnCap.Hint := 'Simpan gambar grafik + analisa koin ini ke halaman Cek Grafik';
+  btnCap.ShowHint := True;
+  btnCek := MakeBtn(pnlCap, 108, 5, 110, 24, 'Cek Grafik', clrPanel2, clrGold, btnCekClick);
+  btnCek.Font.Size := 9;
+  btnCek.Hint := 'Buka halaman Cek Grafik: tabel capture yang tersimpan';
+  btnCek.ShowHint := True;
+  tmrCap := TTimer.Create(Self);
+  tmrCap.Enabled := False;
+  tmrCap.Interval := 2500;
+  tmrCap.OnTimer := tmrCapTimer;
+
   cbCoin.Style := csDropDown;
   cbCoin.Color := clrBg;
   cbCoin.Font.Color := clrText;
@@ -2378,6 +2404,48 @@ begin
   ShowCandleForm(CandleSyms);
 end;
 
+{ harga terbaru koin untuk halaman Cek Grafik }
+function TMainForm.CekPrice(const Sym: string; var P: Double): Boolean;
+var
+  I: Integer;
+begin
+  I := FindCoin(Sym);
+  Result := (I >= 0) and (FCoins[I].Price > 0);
+  if Result then
+    P := FCoins[I].Price;
+end;
+
+procedure TMainForm.btnCapClick(Sender: TObject);
+var
+  Err: string;
+begin
+  if (FSelected = '') or (Length(FChartK) < 30) or not FChartA.Ok then
+  begin
+    Application.MessageBox('Klik dulu satu koin sampai grafik dan analisanya tampil.', 'Capture', MB_OK or MB_ICONINFORMATION);
+    Exit;
+  end;
+  if SaveCekCapture(FSelected, ChartTFLabel(FInterval), FChartTitle, FChartK, FChartA, FCV,
+    memoDetail.Lines.Text, Err) then
+  begin
+    btnCap.Caption := 'Tersimpan!';
+    tmrCap.Enabled := False;
+    tmrCap.Enabled := True;
+  end
+  else
+    Application.MessageBox(PChar('Capture gagal: ' + Err), 'Capture', MB_OK or MB_ICONWARNING);
+end;
+
+procedure TMainForm.tmrCapTimer(Sender: TObject);
+begin
+  tmrCap.Enabled := False;
+  btnCap.Caption := 'Capture';
+end;
+
+procedure TMainForm.btnCekClick(Sender: TObject);
+begin
+  ShowCekGrafik(CekPrice);
+end;
+
 procedure TMainForm.btnSideClick(Sender: TObject);
 begin
   if cbFilter.ItemIndex = 11 then
@@ -2808,6 +2876,7 @@ var
   S, St, StopN: string;
   Tot, StopP: Double;
   Targets: TTargets;
+  Early: TEarly;
 begin
   A := D.A;
   if D.Err = '' then
@@ -2868,6 +2937,17 @@ begin
       L.Add(S);
       L.Add('');
     end;
+
+    L.Add(' --- CIRI-CIRI MAU NAIK / TURUN SEGERA ---');
+    Early := EarlyMove(A, FChartK);
+    L.Add(' PRAKIRAAN: ' + Early.Head + Format('   (skor %d)', [Early.Score]));
+    for I := 0 to High(Early.Items) do
+      if Early.Items[I].Pts > 0 then L.Add(Format('  (+%d) %s', [Early.Items[I].Pts, Early.Items[I].Text]))
+      else if Early.Items[I].Pts < 0 then L.Add(Format('  (%d) %s', [Early.Items[I].Pts, Early.Items[I].Text]))
+      else L.Add('  (!) ' + Early.Items[I].Text);
+    L.Add(' Skor + = tanda mau naik, skor - = tanda mau turun; makin besar angkanya makin kuat.');
+    L.Add(' Kotak "PRAKIRAAN" di pojok kiri atas grafik menampilkan ringkasan ini.');
+    L.Add('');
 
     L.Add(' --- TUNGGU JUAL DI TITIK BERIKUT ---');
     Targets := SellTargets(A, FChartK, StopP, StopN);

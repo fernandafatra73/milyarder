@@ -76,8 +76,21 @@ type
   TTargets = array of TTarget;
 
 procedure ClearAnalysis(var A: TAnalysis);
+type
+  TEarlyItem = record
+    Pts: Integer;    // + tanda naik, - tanda turun
+    Text: string;
+  end;
+  TEarly = record
+    Score, Dir: Integer;   // Dir: +1 condong naik, -1 condong turun, 0 belum jelas
+    Head: string;
+    Squeeze: Boolean;
+    Items: array of TEarlyItem;
+  end;
+
 function SellTargets(const A: TAnalysis; const K: TKlines; out StopPrice: Double;
   out StopNote: string): TTargets;
+function EarlyMove(const A: TAnalysis; const K: TKlines): TEarly;
 function BreakoutStatus(Price, RangeHigh, RangeLow, MA9, MA25, VolRatio: Double): string;
 function BreakoutChance(const K: TKlines; RangeHigh: Double; out Note: string; out EtaMin: Integer): Integer;
 function SidewaysForecast(const K: TKlines; MaxRangePct: Double; out Dir: Integer): Boolean;
@@ -439,6 +452,274 @@ begin
     StopPrice := P - 1.5 * Atr;
     StopNote := '1,5x ATR';
   end;
+end;
+
+{ Ciri-ciri harga akan segera naik/turun dari candle terakhir: momentum, MA,
+  higher low / lower high, lonjakan volume, aliran taker beli/jual, RSI, MACD,
+  penyempitan harga (squeeze), penolakan di support/resisten dan ekor candle.
+  Skor positif = tanda naik, negatif = tanda turun. }
+function EarlyMove(const A: TAnalysis; const K: TKlines): TEarly;
+var
+  n, W, S0, last, j, i, gn, rd: Integer;
+  P, m9, m9b, m25, loA, loB, hiA, hiB, vNow, vOld, qv, tb, body, rngc, loW, upW,
+  r0, r3, g, l, d, bw, minbw, mid, sd, e12, e26, sg, h0, h1, mx: Double;
+  Cl, Rsi, Mc, Sig: array of Double;
+
+  procedure Pt(Points: Integer; const Txt: string);
+  var
+    N2: Integer;
+  begin
+    Inc(Result.Score, Points);
+    N2 := Length(Result.Items);
+    SetLength(Result.Items, N2 + 1);
+    Result.Items[N2].Pts := Points;
+    Result.Items[N2].Text := Txt;
+  end;
+
+  function SMAk(Period, Idx: Integer): Double;
+  var
+    X: Integer;
+  begin
+    Result := 0;
+    for X := Idx - Period + 1 to Idx do
+      Result := Result + K[X].C;
+    Result := Result / Period;
+  end;
+
+  function GapMA(Idx: Integer): Double;
+  begin
+    Result := SMAk(9, Idx) - SMAk(25, Idx);
+  end;
+
+  procedure BBw(Idx: Integer; var Wd: Double);
+  var
+    X: Integer;
+    M, S2: Double;
+  begin
+    M := SMAk(20, Idx);
+    S2 := 0;
+    for X := Idx - 19 to Idx do
+      S2 := S2 + Sqr(K[X].C - M);
+    S2 := Sqrt(S2 / 20);
+    if M > 0 then Wd := 4 * S2 / M else Wd := 0;
+  end;
+
+begin
+  Result.Score := 0;
+  Result.Dir := 0;
+  Result.Squeeze := False;
+  SetLength(Result.Items, 0);
+  n := Length(K);
+  if n < 40 then
+  begin
+    Result.Head := 'Data candle belum cukup';
+    Exit;
+  end;
+  last := n - 1;
+  P := K[last].C;
+  if P <= 0 then
+    Exit;
+
+  { 1. momentum 3 candle terakhir }
+  if (K[last].C > K[last - 1].C) and (K[last - 1].C > K[last - 2].C) and (K[last - 2].C > K[last - 3].C) then
+    Pt(2, '3 candle terakhir naik beruntun (momentum naik)')
+  else if (K[last].C < K[last - 1].C) and (K[last - 1].C < K[last - 2].C) and (K[last - 2].C < K[last - 3].C) then
+    Pt(-2, '3 candle terakhir turun beruntun (momentum turun)');
+
+  { 2. MA9 / MA25 }
+  m9 := SMAk(9, last);
+  m9b := SMAk(9, last - 3);
+  m25 := SMAk(25, last);
+  if m9 > m9b * 1.0003 then Pt(1, 'MA9 menanjak naik')
+  else if m9 < m9b * 0.9997 then Pt(-1, 'MA9 menurun');
+  if P > m9 then Pt(1, 'harga di atas MA9') else Pt(-1, 'harga di bawah MA9');
+  if m9 > m25 then Pt(1, 'MA9 di atas MA25') else Pt(-1, 'MA9 di bawah MA25');
+  for j := last downto last - 2 do
+    if (GapMA(j - 1) <= 0) and (GapMA(j) > 0) then
+    begin
+      Pt(2, Format('MA9 baru memotong MA25 ke atas (%d candle lalu)', [last - j]));
+      Break;
+    end
+    else if (GapMA(j - 1) >= 0) and (GapMA(j) < 0) then
+    begin
+      Pt(-2, Format('MA9 baru memotong MA25 ke bawah (%d candle lalu)', [last - j]));
+      Break;
+    end;
+
+  { 3. struktur: higher low / lower high }
+  loA := MaxDouble; loB := MaxDouble; hiA := 0; hiB := 0;
+  for j := last - 2 to last do
+  begin
+    loA := Min(loA, K[j].L);
+    hiA := Max(hiA, K[j].H);
+  end;
+  for j := last - 5 to last - 3 do
+  begin
+    loB := Min(loB, K[j].L);
+    hiB := Max(hiB, K[j].H);
+  end;
+  if loA > loB then Pt(2, 'higher low: dasar harga makin tinggi (pembeli masuk lebih awal)');
+  if hiA < hiB then Pt(-2, 'lower high: puncak harga makin rendah (penjual menekan)');
+
+  { 4. lonjakan volume }
+  vNow := (K[last].QV + K[last - 1].QV + K[last - 2].QV) / 3;
+  vOld := 0;
+  for j := last - 22 to last - 3 do
+    vOld := vOld + K[j].QV;
+  vOld := vOld / 20;
+  if (vOld > 0) and (vNow >= vOld * 1.5) then
+  begin
+    gn := 0;
+    for j := last - 2 to last do
+      if K[j].C > K[j].O then Inc(gn) else Dec(gn);
+    if gn > 0 then Pt(2, Format('volume %.1fx rata-rata dengan candle dominan hijau', [vNow / vOld]))
+    else Pt(-2, Format('volume %.1fx rata-rata dengan candle dominan merah', [vNow / vOld]));
+  end;
+
+  { 5. aliran taker beli vs jual 5 candle }
+  qv := 0;
+  tb := 0;
+  for j := last - 4 to last do
+  begin
+    qv := qv + K[j].QV;
+    tb := tb + K[j].TBQV;
+  end;
+  if qv > 0 then
+  begin
+    if tb / qv >= 0.55 then Pt(2, Format('pembeli agresif dominan %.0f%% (5 candle)', [tb / qv * 100]))
+    else if tb / qv >= 0.52 then Pt(1, Format('pembeli sedikit dominan %.0f%%', [tb / qv * 100]))
+    else if tb / qv <= 0.45 then Pt(-2, Format('penjual agresif dominan %.0f%% (5 candle)', [(1 - tb / qv) * 100]))
+    else if tb / qv <= 0.48 then Pt(-1, Format('penjual sedikit dominan %.0f%%', [(1 - tb / qv) * 100]));
+  end;
+
+  { 6. RSI14 dan 7. MACD pada 100 candle terakhir }
+  W := Min(100, n);
+  S0 := n - W;
+  SetLength(Cl, W);
+  SetLength(Rsi, W);
+  SetLength(Mc, W);
+  SetLength(Sig, W);
+  for i := 0 to W - 1 do
+    Cl[i] := K[S0 + i].C;
+  g := 0;
+  l := 0;
+  for i := 0 to W - 1 do
+  begin
+    Rsi[i] := 50;
+    if i = 0 then Continue;
+    d := Cl[i] - Cl[i - 1];
+    if i <= 14 then
+    begin
+      g := g + Max(d, 0);
+      l := l + Max(-d, 0);
+      if i = 14 then
+      begin
+        g := g / 14;
+        l := l / 14;
+      end;
+    end
+    else
+    begin
+      g := (g * 13 + Max(d, 0)) / 14;
+      l := (l * 13 + Max(-d, 0)) / 14;
+    end;
+    if i >= 14 then
+      if l = 0 then Rsi[i] := 100 else Rsi[i] := 100 - 100 / (1 + g / l);
+  end;
+  r0 := Rsi[W - 1];
+  r3 := Rsi[W - 4];
+  if (r3 < 30) and (r0 >= 30) then Pt(2, Format('RSI keluar dari jenuh jual (%.0f): pantulan naik', [r0]))
+  else if (r3 > 70) and (r0 <= 70) then Pt(-2, Format('RSI keluar dari jenuh beli (%.0f): koreksi turun', [r0]))
+  else if r0 >= 75 then Pt(-1, Format('RSI jenuh beli (%.0f): rawan koreksi', [r0]))
+  else if r0 <= 25 then Pt(1, Format('RSI jenuh jual (%.0f): rawan memantul', [r0]))
+  else if r0 > r3 + 3 then Pt(1, Format('RSI menguat %.0f -> %.0f', [r3, r0]))
+  else if r0 < r3 - 3 then Pt(-1, Format('RSI melemah %.0f -> %.0f', [r3, r0]));
+
+  e12 := Cl[0];
+  e26 := Cl[0];
+  sg := 0;
+  for i := 0 to W - 1 do
+  begin
+    if i > 0 then
+    begin
+      e12 := e12 + 2 / 13 * (Cl[i] - e12);
+      e26 := e26 + 2 / 27 * (Cl[i] - e26);
+    end;
+    Mc[i] := e12 - e26;
+    if i = 0 then sg := Mc[0] else sg := sg + 2 / 10 * (Mc[i] - sg);
+    Sig[i] := sg;
+  end;
+  h0 := Mc[W - 1] - Sig[W - 1];
+  h1 := Mc[W - 2] - Sig[W - 2];
+  if (h1 <= 0) and (h0 > 0) then Pt(2, 'MACD baru memotong sinyal ke atas')
+  else if (h1 >= 0) and (h0 < 0) then Pt(-2, 'MACD baru memotong sinyal ke bawah')
+  else if (h0 > 0) and (h0 > h1) then Pt(1, 'MACD histogram menguat (momentum naik)')
+  else if (h0 < 0) and (h0 < h1) then Pt(-1, 'MACD histogram melemah (momentum turun)');
+
+  { 8. penyempitan harga (Bollinger squeeze): tanda ledakan besar segera }
+  BBw(last, bw);
+  minbw := MaxDouble;
+  for j := last - 20 to last - 1 do
+  begin
+    BBw(j, mx);
+    minbw := Min(minbw, mx);
+  end;
+  if (bw > 0) and (bw <= minbw * 1.15) then
+  begin
+    Result.Squeeze := True;
+    SetLength(Result.Items, Length(Result.Items) + 1);
+    Result.Items[High(Result.Items)].Pts := 0;
+    Result.Items[High(Result.Items)].Text := 'harga MENYEMPIT (squeeze): pergerakan besar akan segera terjadi, arah mengikuti tanda lain';
+  end;
+
+  { 9. dekat resisten / support }
+  if A.Ok then
+  begin
+    if (A.SwingRes > 0) and (P < A.SwingRes) and ((A.SwingRes - P) / A.SwingRes <= 0.005) then
+      Pt(1, Format('menekan resisten %s: bila tembus akan naik cepat', [FmtPrice(A.SwingRes)]));
+    if (A.SwingSup > 0) and (P > A.SwingSup) and ((P - A.SwingSup) / P <= 0.005) then
+    begin
+      if K[last].C > K[last].O then Pt(1, Format('memantul di dekat support %s', [FmtPrice(A.SwingSup)]))
+      else Pt(-1, Format('menekan support %s: bila jebol akan turun cepat', [FmtPrice(A.SwingSup)]));
+    end;
+  end;
+
+  { 10. ekor candle (penolakan harga) }
+  body := Abs(K[last - 1].C - K[last - 1].O);
+  rngc := K[last - 1].H - K[last - 1].L;
+  loW := Min(K[last - 1].O, K[last - 1].C) - K[last - 1].L;
+  upW := K[last - 1].H - Max(K[last - 1].O, K[last - 1].C);
+  if rngc > 0 then
+  begin
+    if (loW >= 2 * body) and (loW >= rngc * 0.5) then
+      Pt(1, 'candle sebelumnya berekor bawah panjang: penurunan ditolak')
+    else if (upW >= 2 * body) and (upW >= rngc * 0.5) then
+      Pt(-1, 'candle sebelumnya berekor atas panjang: kenaikan ditolak');
+  end;
+
+  { kesimpulan }
+  if Result.Score >= 6 then
+  begin
+    Result.Dir := 1;
+    Result.Head := 'TANDA KUAT: SEGERA NAIK';
+  end
+  else if Result.Score >= 3 then
+  begin
+    Result.Dir := 1;
+    Result.Head := 'CONDONG NAIK dalam beberapa candle';
+  end
+  else if Result.Score <= -6 then
+  begin
+    Result.Dir := -1;
+    Result.Head := 'TANDA KUAT: SEGERA TURUN';
+  end
+  else if Result.Score <= -3 then
+  begin
+    Result.Dir := -1;
+    Result.Head := 'CONDONG TURUN dalam beberapa candle';
+  end
+  else
+    Result.Head := 'BELUM JELAS - tunggu tanda lebih kuat';
 end;
 
 { Gabungkan candle terbaru (U) ke grafik (K): candle dengan waktu buka sama

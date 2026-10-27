@@ -13,6 +13,8 @@ uses
 
 function ShotToKlines(const FileName: string; HighP, LowP: Double;
   var K: TKlines; var Info: string): Boolean;
+function LoadAnyPicture(const FileName: string; Bmp: TBitmap): Boolean;
+function SaveBitmapPng(Bmp: TBitmap; const FileName: string): Boolean;
 
 implementation
 
@@ -84,6 +86,64 @@ begin
         finally
           Tmp.Free;
         end;
+      finally
+        Dispose(Img);
+      end;
+    finally
+      Shutdown(Tok);
+    end;
+  finally
+    FreeLibrary(Lib);
+  end;
+end;
+
+type
+  TGdipCreateBitmapFromHBITMAP = function(HBmp: HBITMAP; Pal: HPALETTE; var Bmp: Pointer): Integer; stdcall;
+  TGdipSaveImageToFile = function(Img: Pointer; FileName: PWideChar; Clsid: PGUID; Params: Pointer): Integer; stdcall;
+
+const
+  PngEncoderClsid: TGUID = '{557CF406-1A04-11D3-9A73-0000F81EF32E}';
+
+{ Simpan bitmap sebagai PNG lewat GDI+ (False bila gagal) }
+function SaveBitmapPng(Bmp: TBitmap; const FileName: string): Boolean;
+var
+  Lib: HMODULE;
+  Startup: TGdiplusStartup;
+  FromHBmp: TGdipCreateBitmapFromHBITMAP;
+  SaveFile: TGdipSaveImageToFile;
+  Dispose: TGdipDisposeImage;
+  Shutdown: TGdiplusShutdown;
+  Inp: TGdipStartupInput;
+  Tok: Cardinal;
+  Img: Pointer;
+  WName: WideString;
+begin
+  Result := False;
+  Lib := LoadLibrary('gdiplus.dll');
+  if Lib = 0 then
+    Exit;
+  try
+    Startup := GetProcAddress(Lib, 'GdiplusStartup');
+    FromHBmp := GetProcAddress(Lib, 'GdipCreateBitmapFromHBITMAP');
+    SaveFile := GetProcAddress(Lib, 'GdipSaveImageToFile');
+    Dispose := GetProcAddress(Lib, 'GdipDisposeImage');
+    Shutdown := GetProcAddress(Lib, 'GdiplusShutdown');
+    if not (Assigned(Startup) and Assigned(FromHBmp) and Assigned(SaveFile) and
+      Assigned(Dispose) and Assigned(Shutdown)) then
+      Exit;
+    Inp.Version := 1;
+    Inp.Callback := nil;
+    Inp.SuppressThread := False;
+    Inp.SuppressCodecs := False;
+    if Startup(Tok, Inp, nil) <> 0 then
+      Exit;
+    try
+      Img := nil;
+      if FromHBmp(Bmp.Handle, 0, Img) <> 0 then
+        Exit;
+      try
+        WName := WideString(FileName);
+        Result := SaveFile(Img, PWideChar(WName), @PngEncoderClsid, nil) = 0;
       finally
         Dispose(Img);
       end;

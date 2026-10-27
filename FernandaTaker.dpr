@@ -13,6 +13,7 @@ uses
   uExness in 'uExness.pas',
   uCandle in 'uCandle.pas',
   uShot in 'uShot.pas',
+  uCek in 'uCek.pas',
   uMain in 'uMain.pas';
 
 begin

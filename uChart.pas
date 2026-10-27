@@ -190,6 +190,21 @@ begin
   C.Pen.Width := 1;
 end;
 
+{ catatan target jual untuk label grafik: maksimal dua alasan pertama }
+function ShortNote(const S: string): string;
+var
+  P1, P2: Integer;
+begin
+  Result := S;
+  P1 := Pos(' + ', S);
+  if P1 > 0 then
+  begin
+    P2 := Pos(' + ', Copy(S, P1 + 3, MaxInt));
+    if P2 > 0 then
+      Result := Copy(S, 1, P1 + 2 + P2 - 1) + ' ...';
+  end;
+end;
+
 type
   TMark = record
     Idx, Dir, Str: Integer;
@@ -236,6 +251,16 @@ var
   Tg: TTargets;
   StopP: Double;
   StopN: string;
+  Er: TEarly;
+  bx, by, bwid, bln, bi, bj, bt: Integer;
+  bs: string;
+  BLines: array[0..3] of string;
+  BCols: array[0..3] of TColor;
+  tgN, tgI, tgJ, tgY, tgLast: Integer;
+  tgP: array[0..3] of Double;
+  tgC: array[0..3] of TColor;
+  tgV: Double;
+  tgK: TColor;
   n, vis, first, last, lastData, maxVis, i, m, x, bw, plotL, plotR, plotT, plotB, volT, volB, y1, y2, hov, tx: Integer;
   hi, lo, vmax, slot, v, step, zmid: Double;
   cum: array of Double;
@@ -279,6 +304,7 @@ var
   procedure Level(P: Double; Col: TColor; const T: string);
   var
     YY: Integer;
+    S2: string;
   begin
     if (P <= lo) or (P >= hi) then
       Exit;
@@ -289,7 +315,9 @@ var
     C.MoveTo(plotL, YY);
     C.LineTo(plotR, YY);
     C.Pen.Style := psSolid;
-    TextAt(plotL + 4, YY - 15, T, Col, True);
+    S2 := T + '  (' + FmtPct((P - K[n - 1].C) / K[n - 1].C * 100) + ')';
+    C.Font.Style := [fsBold];
+    TextAt(plotR - C.TextWidth(S2) - 6, YY - 15, S2, Col, True);
   end;
 
 begin
@@ -514,7 +542,7 @@ begin
     for mk := 0 to High(Tg) do
     begin
       mt := Format('JUAL %d  %s  (%s)  %s', [mk + 1, FmtPrice(Tg[mk].Price),
-        FmtPct((Tg[mk].Price - K[n - 1].C) / K[n - 1].C * 100), Tg[mk].Note]);
+        FmtPct((Tg[mk].Price - K[n - 1].C) / K[n - 1].C * 100), ShortNote(Tg[mk].Note)]);
       if (Tg[mk].Price > lo) and (Tg[mk].Price < hi) then
       begin
         my := Y(Tg[mk].Price);
@@ -546,7 +574,95 @@ begin
       TextAt(plotR - C.TextWidth(mt) - 6, my + 3, mt, clrDown, True);
     end;
   end;
+
+  { kotak prakiraan: ciri-ciri mau naik / turun secepatnya }
+  if A.Ok and (n >= 40) then
+  begin
+    Er := EarlyMove(A, K);
+    BLines[0] := 'PRAKIRAAN: ' + Er.Head + Format('  (skor %d)', [Er.Score]);
+    if Er.Dir > 0 then BCols[0] := clrUp else if Er.Dir < 0 then BCols[0] := clrDown else BCols[0] := clrGold;
+    bln := 1;
+    for bi := 1 to 3 do   // 3 ciri terkuat
+    begin
+      bt := -1;
+      for bj := 0 to High(Er.Items) do
+        if (Er.Items[bj].Pts <> 0) and (Er.Items[bj].Text <> '') and
+          ((bt < 0) or (Abs(Er.Items[bj].Pts) > Abs(Er.Items[bt].Pts))) then
+          bt := bj;
+      if bt < 0 then Break;
+      if Er.Items[bt].Pts > 0 then BCols[bln] := clrUp else BCols[bln] := clrDown;
+      if Er.Items[bt].Pts > 0 then bs := '+' else bs := '-';
+      BLines[bln] := ' ' + bs + ' ' + Er.Items[bt].Text;
+      Er.Items[bt].Text := '';   // sudah dipakai
+      Inc(bln);
+    end;
+    if Er.Squeeze and (bln < 4) then
+    begin
+      BLines[bln] := ' ! harga menyempit: gerakan besar segera terjadi';
+      BCols[bln] := clrGold;
+      Inc(bln);
+    end;
+    C.Font.Size := 8;
+    bwid := 0;
+    for bi := 0 to bln - 1 do
+      bwid := Max(bwid, C.TextWidth(BLines[bi]));
+    bx := plotL + 8;
+    by := plotT + 6;
+    C.Brush.Style := bsSolid;
+    C.Brush.Color := clrBg;
+    if Er.Dir > 0 then C.Pen.Color := clrUp else if Er.Dir < 0 then C.Pen.Color := clrDown else C.Pen.Color := clrGold;
+    C.Pen.Style := psSolid;
+    C.Pen.Width := 1;
+    C.Rectangle(bx - 5, by - 3, bx + bwid + 7, by + bln * 14 + 3);
+    for bi := 0 to bln - 1 do
+      TextAt(bx, by + bi * 14, BLines[bi], BCols[bi], bi = 0);
+  end;
   SelectClipRgn(C.Handle, 0);
+
+  { tag harga support / resisten di skala kanan (hindari tumpang tindih) }
+  if A.Ok then
+  begin
+    tgN := 0;
+    if (A.SwingRes > lo) and (A.SwingRes < hi) then
+    begin tgP[tgN] := A.SwingRes; tgC[tgN] := clrDown; Inc(tgN); end;
+    if (A.SwingSup > lo) and (A.SwingSup < hi) then
+    begin tgP[tgN] := A.SwingSup; tgC[tgN] := clrUp; Inc(tgN); end;
+    if (A.StrongSupHits > 0) and (A.StrongSup > lo) and (A.StrongSup < hi) then
+    begin tgP[tgN] := A.StrongSup; tgC[tgN] := clrGold; Inc(tgN); end;
+    if (A.StrongResHits > 0) and (A.StrongRes > lo) and (A.StrongRes < hi) then
+    begin tgP[tgN] := A.StrongRes; tgC[tgN] := clrMA25; Inc(tgN); end;
+    for tgI := 1 to tgN - 1 do   // urut harga tertinggi di atas
+    begin
+      tgV := tgP[tgI];
+      tgK := tgC[tgI];
+      tgJ := tgI - 1;
+      while (tgJ >= 0) and (tgP[tgJ] < tgV) do
+      begin
+        tgP[tgJ + 1] := tgP[tgJ];
+        tgC[tgJ + 1] := tgC[tgJ];
+        Dec(tgJ);
+      end;
+      tgP[tgJ + 1] := tgV;
+      tgC[tgJ + 1] := tgK;
+    end;
+    tgLast := -100;
+    for tgI := 0 to tgN - 1 do
+    begin
+      tgY := Y(tgP[tgI]);
+      if tgY < tgLast + 16 then
+        tgY := tgLast + 16;
+      tgLast := tgY;
+      C.Brush.Style := bsSolid;
+      C.Brush.Color := tgC[tgI];
+      C.Pen.Style := psClear;
+      C.Rectangle(plotR + 2, tgY - 8, R.Right - 2, tgY + 9);
+      C.Pen.Style := psSolid;
+      if (tgC[tgI] = clrGold) or (tgC[tgI] = clrUp) then
+        TextAt(plotR + 5, tgY - 7, FmtPrice(tgP[tgI]), clrBg, True)
+      else
+        TextAt(plotR + 5, tgY - 7, FmtPrice(tgP[tgI]), clrText, True);
+    end;
+  end;
 
   { garis & label harga terakhir }
   Kc := K[n - 1];
